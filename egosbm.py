@@ -292,61 +292,53 @@ class EgocentricSBM(MutableSequence):
             return True
         except TypeError: return False
     
-    def sum_pi(self, pi=None, approx=False):
-        if pi is None: pi = self.pi
-        out = [sum(p) for p in pi]
+    def find_sum(self, list_of_vecs, approx=False):
+        out = [sum(v) for v in list_of_vecs]
         if approx: out = [round(x, self.precision) for x in out]
         return out
+
+    def find_mean(self, list_of_vecs, pi=None, approx=False):
+        if pi is None: pi = self.pi
+        elif isinstance(pi, str) and pi=='uni': pi = tuple([(1/b,)*b for b in self.shape])
+        out = [sum([i*j for i, j in zip(v, p)]) for v, p in zip(list_of_vecs, pi)]
+        if approx: out = [round(x, self.precision) for x in out]
+        return out
+    
+    def sum_pi(self, pi=None, approx=False):
+        if pi is None: pi = self.pi
+        elif isinstance(pi, str) and pi=='uni': pi = tuple([(1/b,)*b for b in self.shape])
+        return self.find_sum(pi, approx)
     
     def sum_rho(self, rho=None, approx=False):
         if rho is None: rho = self.rho
-        out = [sum(r) for r in rho]
-        if approx: out = [round(x, self.precision) for x in out]
-        return out
+        return self.find_sum(rho, approx)
     
     def dev_pi(self, pi=None, approx=False):
         if pi is None: pi = self.pi
-        out = [sum([i**2 for i in p]) for p in pi]
-        if approx: out = [round(x, self.precision) for x in out]
-        return out
+        elif isinstance(pi, str) and pi=='uni': pi = tuple([(1/b,)*b for b in self.shape])
+        return self.find_mean(pi, pi, approx)
     
     def mean_rho(self, rho=None, pi=None, approx=False):
-        if pi is None: pi = self.pi
         if rho is None: rho = self.rho
-        out = [sum([m*n for m, n in zip(r, p)]) for r, p in zip(rho, pi)]
-        if approx: out = [round(x, self.precision) for x in out]
-        return out
+        return self.find_mean(rho, pi, approx)
     
     def mean_omega(self, omega=None, pi=None, approx=False):
-        if pi is None: pi = self.pi
         if omega is None: omega = self.omega
-        out = [sum([m*n for m, n in zip(o, p)]) for o, p in zip(omega, pi)]
-        if approx: out = [round(x, self.precision) for x in out]
-        return out
+        return self.find_mean(omega, pi, approx)
     
-    def mean_homophily(self, rho=None, approx=False): return self.sum_rho(rho, approx)
+    def mean_homophily(self, rho=None, pi=None, approx=False): return self.mean_rho(rho, pi, approx)
     
-    def mean_heterophily(self, rho=None, pi=None, approx=False):
-        if pi is None: pi = self.pi
-        if rho is None: rho = self.rho
-        out = [sum([(1-m)*n/(1-n) for m, n in zip(r, p)]) for r, p in zip(rho, pi)]
-        if approx: out = [round(x, self.precision) for x in out]
-        return out
+    def mean_heterophily(self, rho=None, pi=None, approx=False): return [1-x for x in self.mean_homophily(rho, pi, approx)]
     
-    def mean_homoffinity(self, omega=None, rho=None, approx=False):
+    def mean_homoffinity(self, omega=None, rho=None, pi=None, approx=False):
         if rho is None: rho = self.rho
         if omega is None: omega = self.omega
-        out = [sum([m*n for m, n in zip(o, r)]) for o, r in zip(omega, rho)]
-        if approx: out = [round(x, self.precision) for x in out]
-        return out
+        return self.find_mean([[w*m for w, m in zip(o, r)] for o, r in zip(omega, rho)], pi, approx)
     
     def mean_heteroffinity(self, omega=None, rho=None, pi=None, approx=False):
-        if pi is None: pi = self.pi
         if rho is None: rho = self.rho
         if omega is None: omega = self.omega
-        out = [sum([(1-m)*n*w/(1-n) for w, m, n in zip(o, r, p)]) for o, r, p in zip(omega, rho, pi)]
-        if approx: out = [round(x, self.precision) for x in out]
-        return out
+        return self.find_mean([[w*(1-m) for w, m in zip(o, r)] for o, r in zip(omega, rho)], pi, approx)
 
     def check_consistency(self, pi=None, omega=None, rho=None):
         if pi is None: pi = self.pi
@@ -553,14 +545,14 @@ class EgocentricSBM(MutableSequence):
             self._precision = egocentric_sbm.precision
             
             if model_type=='full':
-                self.params = [[(o, r/p, (1-r)/(1-p)) for r, o, p in zip(egocentric_sbm.rho[i], egocentric_sbm.omega[i], egocentric_sbm.pi[i])] for i in range(egocentric_sbm.ndim)]
-                self.psi = [(np.diag([x[0] for x in item]), np.diag([x[1]-x[2] for x in item])+np.vstack([x[2]*np.ones(len(item)) for x in item])) for item in self.params]
+                self.params = tuple([tuple([(o, r/p, (1-r)/(1-p)) for r, o, p in zip(egocentric_sbm.rho[i], egocentric_sbm.omega[i], egocentric_sbm.pi[i])]) for i in range(egocentric_sbm.ndim)])
+                self.psi = tuple([(np.diag([x[0] for x in item]), np.diag([x[1]-x[2] for x in item])+np.vstack([x[2]*np.ones(len(item)) for x in item])) for item in self.params])
             elif model_type=='pp': #planted-partition model
-                self.params = (self.meanomega, list(zip(egocentric_sbm.mean_homophily(), egocentric_sbm.mean_heterophily())))
-                self.psi = [(self.params[0]*np.eye(egocentric_sbm.shape[i]), (self.params[1][i][0]-self.params[1][i][1])*np.eye(egocentric_sbm.shape[i])+self.params[1][i][1]*np.ones([egocentric_sbm.shape[i], egocentric_sbm.shape[i]])) for i in range(egocentric_sbm.ndim)]
-            elif model_type=='ppcollapsed':
-                self.params = list(zip(egocentric_sbm.mean_homoffinity(), egocentric_sbm.mean_heteroffinity()))
-                self.psi = [(self.params[i][0]-self.params[i][1])*np.eye(egocentric_sbm.shape[i])+self.params[i][1]*np.ones([egocentric_sbm.shape[i], egocentric_sbm.shape[i]]) for i in range(egocentric_sbm.ndim)]
+                self.params = (self.meanomega, tuple([(r/p, (1-r)/(1-p)) for r, p in zip(egocentric_sbm.mean_rho(), egocentric_sbm.dev_pi())]))
+                self.psi = tuple([(self.params[0]*np.eye(egocentric_sbm.shape[i]), (self.params[1][i][0]-self.params[1][i][1])*np.eye(egocentric_sbm.shape[i])+self.params[1][i][1]*np.ones([egocentric_sbm.shape[i], egocentric_sbm.shape[i]])) for i in range(egocentric_sbm.ndim)])
+            elif model_type=='ppcollapsed': #planted-partition model collapsed
+                self.params = tuple([(h/d, (self.meanomega-h)/(1-d)) for h, d in zip(egocentric_sbm.mean_homoffinity(), egocentric_sbm.dev_pi())])
+                self.psi = tuple([(self.params[i][0]-self.params[i][1])*np.eye(egocentric_sbm.shape[i])+self.params[i][1]*np.ones([egocentric_sbm.shape[i], egocentric_sbm.shape[i]]) for i in range(egocentric_sbm.ndim)])
             
             temp = self.get_psi(directed=True)
             self.directed = directed and (temp!=temp.transpose()).any()
@@ -618,6 +610,8 @@ class EgocentricSBM(MutableSequence):
                 out = (out + out.transpose())/2
             if log_ratio: out = np.log2(out) - np.hstack([np.log2(np.diag(out))[:,np.newaxis]]*self.get_shape())
             return out
+
+        def find_mean(self, matrix, pi=None): return np.dot(matrix, self.get_pi(pi))
         
         def generate_people(self, n=100, pi=None): return np.random.multinomial(1, self.get_pi(pi), n)
         
@@ -669,23 +663,23 @@ class EgocentricSBM(MutableSequence):
         def heteroffinity_in(self, pi=None, directed=None, log_ratio=False): return self.affinity_in(pi, directed, log_ratio)-self.homoffinity_in(pi, directed, log_ratio)
         def heteroffinity(self, pi=None, directed=None, log_ratio=False): return self.affinity(pi, directed, log_ratio)-self.homoffinity(pi, directed, log_ratio)
         
-        def affinity_out(self, pi=None, directed=None, log_ratio=False): return np.dot(self.get_psi(directed, log_ratio), self.get_pi(pi))
-        def affinity_in(self, pi=None, directed=None, log_ratio=False): return np.dot(self.get_psi(directed, log_ratio).transpose(), self.get_pi(pi))
+        def affinity_out(self, pi=None, directed=None, log_ratio=False): return self.find_mean(self.get_psi(directed, log_ratio), pi)
+        def affinity_in(self, pi=None, directed=None, log_ratio=False): return self.find_mean(self.get_psi(directed, log_ratio).transpose(), pi)
         def affinity(self, pi=None, directed=None, log_ratio=False):
             if self.directed and (directed or directed is None): raise RuntimeError('affinity is ambiguous for directed SBMs; use affinity_in() or affinity_out()')
             else: return self.affinity_out(pi, directed, log_ratio)
         
-        def mean_homoffinity_out(self, pi=None, directed=None, log_ratio=False): return (self.homoffinity_out(pi, directed, log_ratio)*self.get_pi(pi)).sum()
-        def mean_homoffinity_in(self, pi=None, directed=None, log_ratio=False): return (self.homoffinity_in(pi, directed, log_ratio)*self.get_pi(pi)).sum()
-        def mean_homoffinity(self, pi=None, directed=None, log_ratio=False): return (self.homoffinity(pi, directed, log_ratio)*self.get_pi(pi)).sum()
+        def mean_homoffinity_out(self, pi=None, directed=None, log_ratio=False): return self.find_mean(self.homoffinity_out(pi, directed, log_ratio), pi)
+        def mean_homoffinity_in(self, pi=None, directed=None, log_ratio=False): return self.find_mean(self.homoffinity_in(pi, directed, log_ratio), pi)
+        def mean_homoffinity(self, pi=None, directed=None, log_ratio=False): return self.find_mean(self.homoffinity(pi, directed, log_ratio), pi)
         
-        def mean_heteroffinity_out(self, pi=None, directed=None, log_ratio=False): return (self.heteroffinity_out(pi, directed, log_ratio)*self.get_pi(pi)).sum()
-        def mean_heteroffinity_in(self, pi=None, directed=None, log_ratio=False): return (self.heteroffinity_in(pi, directed, log_ratio)*self.get_pi(pi)).sum()
-        def mean_heteroffinity(self, pi=None, directed=None, log_ratio=False): return (self.heteroffinity_out(pi, directed, log_ratio)*self.get_pi(pi)).sum()
+        def mean_heteroffinity_out(self, pi=None, directed=None, log_ratio=False): return self.find_mean(self.heteroffinity_out(pi, directed, log_ratio), pi)
+        def mean_heteroffinity_in(self, pi=None, directed=None, log_ratio=False): return self.find_mean(self.heteroffinity_in(pi, directed, log_ratio), pi)
+        def mean_heteroffinity(self, pi=None, directed=None, log_ratio=False): return self.find_mean(self.heteroffinity_out(pi, directed, log_ratio), pi)
         
-        def mean_affinity_out(self, pi=None, directed=None, log_ratio=False): return (self.affinity_out(pi, directed, log_ratio)*self.get_pi(pi)).sum()
-        def mean_affinity_in(self, pi=None, directed=None, log_ratio=False): return (self.affinity_in(pi, directed, log_ratio)*self.get_pi(pi)).sum()
-        def mean_affinity(self, pi=None, directed=None, log_ratio=False): return (self.affinity_out(pi, directed, log_ratio)*self.get_pi(pi)).sum()
+        def mean_affinity_out(self, pi=None, directed=None, log_ratio=False): return self.find_mean(self.affinity_out(pi, directed, log_ratio), pi)
+        def mean_affinity_in(self, pi=None, directed=None, log_ratio=False): return self.find_mean(self.affinity_in(pi, directed, log_ratio), pi)
+        def mean_affinity(self, pi=None, directed=None, log_ratio=False): return self.find_mean(self.affinity_out(pi, directed, log_ratio), pi)
         
         def floyd_warshall(self, pw_dist_matrix, paths=True):
             if (pw_dist_matrix<0).any():
@@ -745,26 +739,13 @@ class EgocentricSBM(MutableSequence):
             if not positivity: metric = metric + np.array([[temp*(len(paths[i][j])-1) for j in range(len(paths[i]))] for i in range(len(paths))])
             return metric
         
-        def ind2com(self, matrix, pi=None):
-            a, b = matrix.shape
-            if a!=b or a!=self.get_shape(): raise ValueError('expected square matrix of size %d'%self.get_shape())
-            pi = self.get_pi(pi)
-            pi = np.dot(pi[:,np.newaxis], pi[np.newaxis])
-            return matrix*pi
-            
         def sas_individual_pw(self, log_ratio=True, metric_type=None): return self.dis2met(-self.get_psi(log_ratio=log_ratio), metric_type)
-        def sas_individual_out(self, log_ratio=True, metric_type=None): return self.sas_individual_pw(log_ratio, metric_type).sum(0)
-        def sas_individual_in(self, log_ratio=True, metric_type=None): return self.sas_individual_pw(log_ratio, metric_type).sum(1)
-        def sas_individual(self, log_ratio=True, metric_type=None):
+        def sas_individual_out(self, log_ratio=True, metric_type=None, pi=None): return self.find_mean(self.sas_individual_pw(log_ratio, metric_type), pi)
+        def sas_individual_in(self, log_ratio=True, metric_type=None, pi=None): return self.find_mean(self.sas_individual_pw(log_ratio, metric_type).transpose(), pi)
+        def sas_individual(self, log_ratio=True, metric_type=None, pi=None):
             if self.directed: raise RuntimeError('individual SAS is ambiguous for directed SBMs; use sas_individual_out() or sas_individual_in()')
-            else: return self.sas_individual_out(log_ratio, metric_type)
-        def sas_community_pw(self, log_ratio=True, metric_type=None, pi=None): return self.ind2com(self.sas_individual_pw(log_ratio, metric_type), pi)
-        def sas_community_out(self, log_ratio=True, metric_type=None, pi=None): return self.sas_community_pw(log_ratio, metric_type, pi).sum(0)
-        def sas_community_in(self, log_ratio=True, metric_type=None, pi=None): return self.sas_community_pw(log_ratio, metric_type, pi).sum(1)
-        def sas_community(self, log_ratio=True, metric_type=None, pi=None):
-            if self.directed: raise RuntimeError('community SAS is ambiguous for directed SBMs; use sas_community_out() or sas_community_in()')
-            else: return self.sas_community_out(log_ratio, metric_type, pi)
-        def sas_global(self, log_ratio=True, metric_type=None, pi=None): return self.sas_community_pw(log_ratio, metric_type, pi).sum()
+            else: return self.sas_individual_out(log_ratio, metric_type, pi)
+        def sas_global(self, log_ratio=True, metric_type=None, pi=None): return self.find_mean(self.sas_individual_out(log_ratio, metric_type, pi), pi)
         
 class NetworkData():
 
