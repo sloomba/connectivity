@@ -1,16 +1,15 @@
+from warnings import warn
 from collections.abc import MutableSequence
 import numpy as np
 
 class EgocentricSBM(MutableSequence):
     
     def __init__(self, num_blocks=tuple(), dim_names=None, model_name='egocentric_sbm'):
-        
         if not self.iterable(num_blocks): num_blocks = (num_blocks,)
         num_blocks = tuple(num_blocks)
         if not all([isinstance(b, int) and b>1 for b in num_blocks]): raise ValueError('number of blocks must be an integer greater than 1')
         self._precision = 8
         self._curridx = 0
-        self._currdim = 0
         self.ndim = len(num_blocks)
         self.shape = num_blocks
         self.name = str(model_name)
@@ -27,34 +26,69 @@ class EgocentricSBM(MutableSequence):
     
     @precision.setter
     def precision(self, value):
-        from warnings import warn
-        warn('setting "precision" can affect model consistency checks', RuntimeWarning)
+        if not isinstance(value, int) or value<0: raise ValueError('precision must be an integer no less than 0')
+        if value<8: warn('setting a low "precision" can affect model consistency checks', RuntimeWarning)
         self._precision = value
-        
+
+    def get_params(self): return {'name':self.name, 'shape':self.shape, 'dims':self.dims, 'pi':self.pi, 'rho':self.rho, 'omega':self.omega, 'precision':self.precision}
+
+    def set_params(self, params=dict()):
+        params_old = self.get_params()
+        if isinstance(params, dict): params = params.copy()
+        else: params = dict(params)
+        if 'name' not in params: params['name'] = params_old['name']
+        if 'shape' not in params: params['shape'] = params_old['shape']
+        if 'dims' not in params: params['dims'] = params_old['dims']
+        if 'pi' not in params: params['pi'] = params_old['pi']
+        if 'rho' not in params: params['rho'] = params_old['rho']
+        if 'omega' not in params: params['omega'] = params_old['omega']
+        if 'precision' not in params: params['precision'] = params_old['precision']
+        try:
+            self.__init__(params['shape'], params['dims'], params['name'])
+            self.pi = tuple([tuple(x) for x in params['pi']])
+            self.rho = tuple([tuple(x) for x in params['rho']])
+            self.omega = tuple([tuple(x) for x in params['omega']])
+            self.check_consistency()
+            self.precision = params['precision']
+        except Exception as err:
+            self.set_params(params_old)
+            raise err
+
     def __str__(self):
-        out = ['name:\t'+self.name]
+        params = self.get_params()
+        out = ['name:\t'+params['name']]
         out.append('ndim:\t'+str(self.ndim))
-        out.append('shape:\t'+str(self.shape))
+        out.append('shape:\t'+str(params['shape']))
         out.append('|dims|\t|blocks|')
-        out += [str(x[0])+'\t'+str(x[1]) for x in self.dims]
-        out.append('pi:\t'+str(self.pi))
-        out.append('rho:\t'+str(self.rho))
-        out.append('omega:\t'+str(self.omega))
+        out += [str(x[0])+'\t'+str(x[1]) for x in params['dims']]
+        out.append('pi:\t'+str(params['pi']))
+        out.append('rho:\t'+str(params['rho']))
+        out.append('omega:\t'+str(params['omega']))
         return '\n'.join(out)
     
     def __len__(self): return self.ndim
     
     def __copy__(self):
-        out = type(self)(self.shape, self.dims, self.name)
-        out.pi = self.pi
-        out.rho = self.rho
-        out.omega = self.omega
-        out._precision = self._precision
-        out._currdim = self._currdim
+        params = self.get_params()
+        out = type(self)(params['shape'], params['dims'], params['name'])
+        out.pi = params['pi']
+        out.rho = params['rho']
+        out.omega = params['omega']
+        out.precision = params['precision']
         return out
-    
+
     def copy(self): return self.__copy__()
-    
+
+    def write(self, filepath=None):
+        if filepath is None: filepath = self.name
+        if filepath[-4:]!='.ego': filepath += '.ego'
+        import json
+        json.dump(self.get_params(), open(filepath, 'w'))
+
+    def read(self, filepath):
+        import json
+        self.set_params(json.load(open(filepath, 'r')))
+
     def sort(self, inplace=True, reverse=True, blocks=True, dims=True):
         idx_blocks = list()
         if blocks or dims:
@@ -90,126 +124,82 @@ class EgocentricSBM(MutableSequence):
                 if key<0: key += self.ndim
                 if key>=0 and key<self.ndim: pass
                 else: raise IndexError('sbm index out of range; must be less than ndims')
-            else: raise KeyError('sbm key "%s" not found; must be dimension name'%str(key))
+            else: raise KeyError('sbm key "%s" not found; must be dimension name'%key)
         return key
-    
-    def insert(self, key, num_blocks, block_names=None):
-        if not (isinstance(num_blocks, int) and num_blocks>1): raise ValueError('number of blocks must be an integer greater than 1')
-        if key in self.dimsdict:
-            from warnings import warn
-            warn('this will replace dimension "%s" which already exists'%key)
-            key = self.dimsdict[key]
-            old_shape = self.shape
-            try:
-                temp = list(self.shape)
-                temp[key] = num_blocks
-                self.shape = tuple(temp)
-                temp = list(self.dims)
-                if block_names is None:
-                    temp[key] = temp[key][0]
-                    self.set_dims(temp)
-                elif block_names == 'old':
-                    if len(temp[key][1])!=num_blocks: raise ValueError('cannot retain old block names since new shape (%d) does not match the old shape (%d)'%(len(temp[key][1]), num_blocks))
-                else:
-                    temp[key] = (temp[key][0],  block_names)
-                    self.set_dims(temp)
-            except Exception as err:
-                self.shape = old_shape
-                raise err
-            temp = list(self.omega)
-            mean_omega = self.mean_omega()
-            if len(mean_omega)>0: mean_omega = mean_omega[0]
-            else: mean_omega = 0.0
-            temp[key] = (mean_omega,)*num_blocks
-            self.omega = tuple(temp)
-            temp = list(self.pi)
-            temp[key] = (1/num_blocks,)*num_blocks
-            self.pi = tuple(temp)
-            temp = list(self.rho)
-            temp[key] = (1/num_blocks,)*num_blocks
-            self.rho = tuple(temp)
-        elif isinstance(key, int) or isinstance(key, str):
-            if isinstance(key, str):
-                keyname = key
-                key = self.ndim
-            else: keyname = None
-            old_shape = self.shape
-            try:                
-                temp = list(self.shape)
-                temp.insert(key, num_blocks)
-                self.shape = tuple(temp)            
-                temp = list(self.dims)
-                if block_names is None: temp.insert(key, keyname)
-                else: temp.insert(key, (keyname,  block_names))
-                self.ndim += 1
-                self.set_dims(temp)
-            except Exception as err:
-                self.ndim -=1
-                self.shape = old_shape
-                raise err
-            temp = list(self.omega)
-            mean_omega = self.mean_omega()
-            if len(mean_omega)>0: mean_omega = mean_omega[0]
-            else: mean_omega = 0.0
-            temp.insert(key, (mean_omega,)*num_blocks)
-            self.omega = tuple(temp)
-            temp = list(self.pi)
-            temp.insert(key, (1/num_blocks,)*num_blocks)
-            self.pi = tuple(temp)
-            temp = list(self.rho)
-            temp.insert(key, (1/num_blocks,)*num_blocks)
-            self.rho = tuple(temp)
-        else: raise ValueError('either enter an integer index (dimension number) or a string key (dimension name)')
     
     def __getitem__(self, key):
         key = self.get_key(key)
         return {'index':key,
                 'name':self.dims[key][0], 
                 'blocks':self.dims[key][1], 
-                'pi':self.pi[key], 
+                'pi':self.pi[key],
                 'rho':self.rho[key], 
                 'omega':self.omega[key]}
-    
+
     def __setitem__(self, key, value):
-        if not self.iterable(key):
-            if isinstance(value, dict):
-                if len(value)==1:
-                    key = (key, list(value.keys())[0])
-                    value = list(value.values())[0]
-                else: raise ValueError('you can set only one attribute at a time')
-            elif self.iterable(value):
-                if len(value)==2:
-                    key = (key, value[0])
-                    value = value[1]
-                else: raise ValueError('you can set only one attribute at a time')
-            else: raise ValueError('provide a "(p, v)" tuple as value and "d" as key to set property "p" of dimension "d" to value "v"')
-        if len(key)==2:
-            k = self.get_key(key[0])
-            if key[1]=='pi':
-                curr_pi = list(self.pi)
-                curr_pi[k] = value
-                self.set_pi(curr_pi)
-            elif key[1]=='rho':
-                curr_rho = list(self.rho)
-                curr_rho[k] = value
-                self.set_rho(curr_rho)
-            elif key[1]=='omega':
-                curr_omega = list(self.omega)
-                curr_omega[k] = value
-                self.set_omega(curr_omega)
-            elif key[1]=='blocks':
-                curr_dims = list(self.dims)
-                curr_dims[k] = list(curr_dims[k])
-                curr_dims[k][1] = value
-                self.set_dims(curr_dims)
-            elif key[1]=='name':
-                curr_dims = list(self.dims)
-                curr_dims[k] = list(curr_dims[k])
-                curr_dims[k][0] = value
-                self.set_dims(curr_dims)
-            elif key[1]=='index': raise ValueError('cannot set dim index; use pop() and insert() methods to reorder dims')
-            else: raise ValueError('no such property "%s"'%str(key[1]))
-        else: raise ValueError('provide a "(d, p)" tuple as key and "v" as value to set property "p" of dimension "d" to value "v"')        
+        key = self.get_key(key)
+        if not isinstance(value, dict): value = dict(value)
+        params = dict()
+        found = set()
+        if 'pi' in value:
+            params['pi'] = list(self.pi)
+            params['pi'][key] = value['pi']
+            found.add('pi')
+        if 'rho' in value:
+            params['rho'] = list(self.rho)
+            params['rho'][key] = value['rho']
+            found.add('rho')
+        if 'omega' in value:
+            params['omega'] = list(self.omega)
+            params['omega'][key] = value['omega']
+            found.add('omega')
+        if 'name' in value or 'blocks' in value:
+            params['dims'] = list(self.dims)
+            params['dims'][key] = list(params['dims'][key])
+            if 'name' in value:
+                params['dims'][key][0] = value['name']
+                found.add('name')
+            if 'blocks' in value:
+                params['dims'][key][1] = value['blocks']
+                found.add('blocks')
+        self.set_params(params)
+        found = value.keys() - found
+        if found: warn('no such settable attributes found: %s'%found)
+
+    def insert(self, key, value):
+        if key in self.dimsdict:
+            warn('this will replace attributes for dimension "%s" which already exists'%key)
+            self.__setitem__(key, value)
+        elif isinstance(key, int) or isinstance(key, str):
+            if isinstance(key, str):
+                keyname = key
+                key = self.ndim
+            else: keyname = None
+            if not isinstance(value, dict): value = dict(value)
+            params = self.get_params()
+            for x in ['pi', 'rho', 'omega', 'dims', 'shape']: params[x] = list(params[x])
+            num_blocks = [len(value[x]) if self.iterable(value[x]) else -1 for x in ['pi', 'rho', 'omega', 'blocks'] if x in value]
+            if 'num' in value: num_blocks.append(value['num'])
+            num = 0
+            for i in range(len(num_blocks)):
+                if num_blocks[i]>1:
+                    if not num: num = num_blocks[i]
+                    else:
+                        if num != num_blocks[i]: raise ValueError('given attributes exhibit inconsistent number of blocks')
+            if not num: raise ValueError('unable to infer number of blocks; set "num" attribute appropriately')
+            if 'pi' in value: params['pi'].insert(key, value['pi'])
+            else: params['pi'].insert(key, (1/num,)*num)
+            if 'rho' in value: params['rho'].insert(key, value['rho'])
+            else: params['rho'].insert(key, (1/num,)*num)
+            if 'omega' in value: params['omega'].insert(key, value['omega'])
+            else: params['omega'].insert(key, (sum(self.mean_omega())/self.ndim,)*num)
+            if 'blocks' in value: params['dims'].insert(key, (keyname, value['blocks']))
+            else: params['dims'].insert(key, keyname)
+            params['shape'].insert(key, num)
+            self.set_params(params)
+            found = value.keys() - {'pi', 'rho', 'omega', 'blocks', 'num'}
+            if found: warn('no such settable attributes found: %s'%found)
+        else: raise ValueError('either enter an integer index (dimension number) or a string key (dimension name)')
             
     def __delitem__(self, key):
         key = self.get_key(key)
@@ -344,34 +334,38 @@ class EgocentricSBM(MutableSequence):
         if pi is None: pi = self.pi
         if omega is None: omega = self.omega
         if rho is None: rho = self.rho
+        #shape tests
+        if self.shape != tuple([len(p) for p in pi]): raise ValueError('pi must have shape %s'%self.shape)
+        if self.shape != tuple([len(r) for r in rho]): raise ValueError('rho must have shape %s'%self.shape)
+        if self.shape != tuple([len(o) for o in omega]): raise ValueError('omega must have shape %s'%self.shape)
         #pi tests
-        if not all([all([0<i<1 for i in p])for p in pi]): raise ValueError('pi must be between 0 and 1 (exclusive)')
+        if not all([all([0<i<1 for i in p]) for p in pi]): raise ValueError('pi must be between 0 and 1 (exclusive)')
         if not all([p==1 for p in self.sum_pi(pi=pi, approx=True)]): raise ValueError('pi must sum up to 1')
         #omega tests
-        if not all([all([0<=i for i in o])for o in omega]): raise ValueError('omega must be >=0')
+        if not all([all([0<=i for i in o]) for o in omega]): raise ValueError('omega must be >=0')
         mean_omega = self.mean_omega(omega=omega, approx=True)
         for i in range(1, len(mean_omega)):
             if not mean_omega[i] == mean_omega[0]: raise ValueError('mean omega must remain same')
         #rho tests
-        if not all([all([0<=i<=1 for i in r])for r in rho]): raise ValueError('rho must be between 0 and 1 (inclusive)')
+        if not all([all([0<=i<=1 for i in r]) for r in rho]): raise ValueError('rho must be between 0 and 1 (inclusive)')
 
     def get_dims(self):
         from itertools import product
         dims_flat = [[(dim[0]+':'+str(d)) for d in dim[1]] for dim in self.dims]
         return tuple([','.join(i) for i in product(*dims_flat)])
     
-    def get_nextdim(self):
-        while str(self._currdim) in self.dimsdict:
-            self._currdim += 1
-        self._currdim += 1
-        return str(self._currdim-1)
+    def get_nextdim(self, dim_names=None):
+        from itertools import count
+        if dim_names is None: dim_names = self.dimsdict
+        dimnum = [int(d) for d in dim_names if str(d).isdigit()]
+        if dimnum: return map(str, count(max(dimnum)+1))
+        else: return map(str, count())
     
     def set_dims(self, dims=None):
         if dims is None: dims = [None for i in range(self.ndim)]
         if not self.iterable(dims): raise ValueError('provide all dimension names')
         dims = list(dims)
         if len(dims)!=self.ndim: raise ValueError('provide names for each dimension')
-        dim_set = []
         for i in range(self.ndim):
             if self.iterable(dims[i]):
                 found = False
@@ -381,23 +375,25 @@ class EgocentricSBM(MutableSequence):
                             if len(set(dims[i][1]))!=self.shape[i]: raise ValueError('provide *unique* names for each block of dimension %d'%i)
                             else:
                                 found = True
-                                if dims[i][0] is None: dims[i] = (self.get_nextdim(), tuple(dims[i][1]))
-                                else: dims[i] = (dims[i][0], tuple(dims[i][1]))
+                                dims[i] = [dims[i][0], tuple(dims[i][1])]
                         else: raise ValueError('provide names for each block of dimension %d'%i)
                 if (not found) and len(dims[i])==self.shape[i] and all([not self.iterable(j) for j in dims[i]]):
                     if len(set(dims[i]))!=self.shape[i]: raise ValueError('provide *unique* names for each block of dimension %d'%i)
                     else:
                         found = True
-                        dims[i] = (str(i), tuple(dims[i]))
+                        dims[i] = [None, tuple(dims[i])]
                 if not found: raise ValueError('provide names for each block of dimension %d'%i)
-            else:
-                if dims[i] is None: dims[i] = self.get_nextdim()
-                dims[i] = (dims[i], tuple([str(j) for j in range(self.shape[i])]))
-            if dims[i][0] in dim_set: raise ValueError('provide *unique* name for each dimension; clash on "%s"'%str(dims[i][0]))
-            else: dim_set.append(dims[i][0])        
-        if any([not isinstance(dim, str) for dim in dim_set]): raise TypeError('dimension names must be strings')
+            else: dims[i] = [dims[i], tuple([str(j) for j in range(self.shape[i])])]
+        dimcount = self.get_nextdim([x[0] for x in dims])
+        dimset = []
+        for i in range(self.ndim):
+            if dims[i][0] is None: dims[i][0] = next(dimcount)
+            if dims[i][0] in dimset: raise ValueError('provide *unique* name for each dimension; clash on "%s"'%dims[i][0])
+            dimset.append(dims[i][0])
+            dims[i] = tuple(dims[i])
+        if any([not isinstance(dim, str) for dim in dimset]): raise TypeError('dimension names must be strings')
         self.dims = tuple(dims)
-        self.dimsdict = dict(zip(dim_set, range(self.ndim)))
+        self.dimsdict = dict(zip(dimset, range(self.ndim)))
         
     def get_random_pi(self, pi, omega, min_pi=0., max_pi=1., max_iters=100):
         from random import triangular
@@ -418,7 +414,8 @@ class EgocentricSBM(MutableSequence):
             for i in range(len(omega)):
                 if i not in pair: p[i] = triangular(min_pi, max_pi, pi)
             t = (1 - sum(p))
-            mo = self.mean_omega()[0]
+            mo = self.mean_omega()
+            mo = sum(mo)/len(mo)
             if omega[pair[0]]!=omega[pair[1]]: temp1 = ((mo - sum([o*q for (o, q) in zip(omega, p)])) - omega[pair[0]]*t)/(omega[pair[1]]-omega[pair[0]])
             else: temp1 = triangular(min_pi, max_pi, pi)
             temp2 = t - temp1
@@ -541,7 +538,7 @@ class EgocentricSBM(MutableSequence):
             self.shape = egocentric_sbm.shape
             self.dims = egocentric_sbm.get_dims()
             self.pi = [pi for pi in egocentric_sbm.pi]
-            self.meanomega = egocentric_sbm.mean_omega()[0]
+            self.meanomega = sum(egocentric_sbm.mean_omega())/egocentric_sbm.ndim
             self._precision = egocentric_sbm.precision
             
             if model_type=='full':
@@ -562,8 +559,8 @@ class EgocentricSBM(MutableSequence):
 
         @precision.setter
         def precision(self, value):
-            from warnings import warn
-            warn('setting "precision" can affect model consistency checks', RuntimeWarning)
+            if not isinstance(value, int) or value<0: raise ValueError('precision must be an integer no less than 0')
+            if value<8: warn('setting a low "precision" can affect model consistency checks', RuntimeWarning)
             self._precision = value
             
         def __str__(self):
@@ -604,9 +601,7 @@ class EgocentricSBM(MutableSequence):
             elif self.type=='full': out =  multiplier*np.matmul(self.kron([x[0] for x in self.psi]), self.kron([x[1] for x in self.psi]))
             if directed is None: directed = self.directed
             if not directed:
-                if self.directed:
-                    from warnings import warn
-                    warn('symmetrising the stochastic block matrix', RuntimeWarning)
+                if self.directed: warn('symmetrising the stochastic block matrix', RuntimeWarning)
                 out = (out + out.transpose())/2
             if log_ratio: out = np.log2(out) - np.hstack([np.log2(np.diag(out))[:,np.newaxis]]*self.get_shape())
             return out
@@ -627,9 +622,7 @@ class EgocentricSBM(MutableSequence):
             a = np.random.binomial(1, p)
             if directed is None: directed = self.directed
             if not directed:
-                if self.directed:
-                    from warnings import warn
-                    warn('generating an undirected network from a directed SBM', RuntimeWarning)
+                if self.directed: warn('generating an undirected network from a directed SBM', RuntimeWarning)
                 a = np.triu(a)
                 a = a + a.transpose()
             return (a, p)
@@ -682,9 +675,7 @@ class EgocentricSBM(MutableSequence):
         def mean_affinity(self, pi=None, directed=None, log_ratio=False): return self.find_mean(self.affinity_out(pi, directed, log_ratio), pi)
         
         def floyd_warshall(self, pw_dist_matrix, paths=True):
-            if (pw_dist_matrix<0).any():
-                from warnings import warn
-                warn('negative pairwise distances can lead to negative path lengths')
+            if (pw_dist_matrix<0).any(): warn('negative pairwise distances can lead to negative path lengths')
             a, b = pw_dist_matrix.shape
             if a!=b: raise ValueError('expected square pairwise distance matrix')
             dist = pw_dist_matrix.copy()
@@ -723,7 +714,7 @@ class EgocentricSBM(MutableSequence):
                 elif metric_type=='pseudometametric': return dict(identity=False, symmetry=True, triangle=False)
                 elif metric_type in ['hemimetric', 'pseudoquasimetric']: return dict(identity=False, symmetry=False, triangle=True)
                 elif metric_type is None: return dict(identity=False, symmetry=False, triangle=False)
-                else: raise ValueError ('metric type "%s" not found'%str(metric_type))
+                else: raise ValueError ('metric type "%s" not found'%metric_type)
             a, b = distance_matrix.shape
             if a!=b: raise ValueError('expected square metric matrix')
             metric = distance_matrix.copy()
