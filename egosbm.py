@@ -101,14 +101,17 @@ class EgocentricSBM(MutableSequence):
     def copy(self): return self.__copy__()
 
     def save(self, filepath=None):
-        if filepath is None: filepath = self.name
-        if filepath[-4:]!='.ego': filepath += '.ego'
         import json
-        json.dump(self.get_params(), open(filepath, 'w'))
+        try: json.dump(self.get_params(), filepath)
+        except Exception as err:
+            if filepath is None: filepath = self.name
+            if filepath[-4:]!='.ego': filepath += '.ego'        
+            json.dump(self.get_params(), open(filepath, 'w'))
 
     def load(self, filepath):
         import json
-        self.set_params(json.load(open(filepath, 'r')))
+        try: self.set_params(json.load(filepath))
+        except Exception as err: self.set_params(json.load(open(filepath, 'r')))
 
     def sort(self, inplace=True, reverse=True, blocks=True, dims=True):
         idx_blocks = list()
@@ -265,13 +268,19 @@ class EgocentricSBM(MutableSequence):
             self._curridx += 1
             return self[self._curridx-1]
         
+    def apx(self, param):
+        if self.iterable(param): return [self.apx(p) for p in param]
+        else:
+            if isinstance(param, float) or isinstance(param, int): return round(param, self.precision)
+            else: raise ValueError('expect int or float but got %s'%str(type(param)))
+
     def __eq__(self, other):
         if isinstance(other, type(self)):
             x = self.copy()
             y = other.copy()
             x.sort()
             y.sort()
-            return x.pi==y.pi and x.rho==y.rho and x.omega==y.omega
+            return self.apx(x.pi)==self.apx(y.pi) and self.apx(x.rho)==self.apx(y.rho) and self.apx(x.omega)==self.apx(y.omega)
         else: return False
      
     def __lt__(self, other):
@@ -283,10 +292,16 @@ class EgocentricSBM(MutableSequence):
                 y.sort()
                 i = 0
                 j = 0
+                x_pi = self.apx(x.pi)
+                y_pi = self.apx(y.pi)
+                x_rho = self.apx(x.rho)
+                y_rho = self.apx(y.rho)
+                x_omega = self.apx(x.omega)
+                y_omega = self.apx(y.omega)
                 while i<self.ndim:
                     found = False
                     while j<other.ndim:
-                        if x.pi[i]==y.pi[j] and x.rho[i]==y.rho[j] and x.omega[i]==y.omega[j]:
+                        if x_pi[i]==y_pi[j] and x_rho[i]==y_rho[j] and x_omega[i]==y_omega[j]:
                             found = True
                             break
                         else: j+=1
@@ -375,7 +390,7 @@ class EgocentricSBM(MutableSequence):
     
     def find_sum(self, list_of_vecs, approx=False, collapse=False):
         out = [sum(v) for v in list_of_vecs]
-        if approx: out = [round(x, self.precision) for x in out]
+        if approx: out = self.apx(out)
         if collapse: out = sum(out)/len(out)
         return out
 
@@ -383,7 +398,7 @@ class EgocentricSBM(MutableSequence):
         if pi is None: pi = self.pi
         elif isinstance(pi, str) and pi=='uni': pi = tuple([(1/b,)*b for b in self.shape])
         out = [sum([i*j for i, j in zip(v, p)]) for v, p in zip(list_of_vecs, pi)]
-        if approx: out = [round(x, self.precision) for x in out]
+        if approx: out = self.apx(out)
         if collapse: out = sum(out)/len(out)
         return out
     
@@ -677,27 +692,36 @@ class EgocentricSBM(MutableSequence):
             if not isinstance(value, int) or value<0: raise ValueError('precision must be an integer no less than 0')
             if value<8: warn('setting a low "precision" can affect model consistency checks', RuntimeWarning)
             self._precision = value
+
+        def get_params(self): return {'mode':self.mode, 'name':self.name, 'ndim':self.ndim, 'shape':self.shape, 'dims':self.dims, 'pi':self.pi, 'meanomega':self.meanomega, 'precision':self.precision, 'params':self.params, 'psi':self.psi, 'directed':self.directed}
             
         def __str__(self):
-            out = [['name:', self.name]]
-            out.append(['mode:', self.mode])
-            out.append(['ndim:', str(self.ndim)])
-            out.append(['shape:', str(self.shape)])
-            out.append(['pi:', str(self.pi)])
-            out.append(['params:', str(self.params)])
+            params = self.get_params()
+            out = [['name:', params['name']]]
+            out.append(['mode:', params['mode']])
+            out.append(['ndim:', str(params['ndim'])])
+            out.append(['shape:', str(params['shape'])])
+            out.append(['directed:', str(params['directed'])])
+            out.append(['affinity:', str(params['meanomega'])])
+            out.append(['pi:', str(params['pi'])])
+            out.append(['params:', str(params['params'])])
             width = max([len(i[0])+4 for i in out])
             for i in range(len(out)): out[i] = out[i][0].ljust(width) + out[i][1]
             return '\n'.join(out)
     
         def __len__(self): return self.get_shape()
 
+        def apx(self, param): return np.around(param, self.precision)
+
         def __eq__(self, other):
-            if isinstance(other, type(self)): return (self.get_psi(sort=True)==other.get_psi(sort=True)).all()
+            if isinstance(other, type(self)):
+                if len(self)==len(other): return (self.get_psi(approx=True, sort=True)==other.get_psi(approx=True, sort=True)).all()
+                else: return False
             else: return False
 
         def save(self, filepath=None):
             if filepath is None: filepath = self.name
-            np.savez(filepath, name=self.name, mode=self.mode, ndim=self.ndim, shape=self.shape, dims=self.dims, params=self.params, pi=self.pi, psi=self.psi, meanomega=self.meanomega, precision=self.precision, directed=self.directed)
+            np.savez(filepath, **self.get_params())
 
         def load(self, filepath):
             file = np.load(filepath)
@@ -712,6 +736,15 @@ class EgocentricSBM(MutableSequence):
             self.meanomega = float(file['meanomega'])
             self.precision = int(file['precision'])
             self.directed = bool(file['directed'])
+
+        def __copy__(self):
+            from tempfile import TemporaryFile
+            fd = TemporaryFile(suffix='.npz')
+            self.save(fd)
+            fd.seek(0)
+            return type(self)(filepath=fd)
+
+        def copy(self): return self.__copy__()
             
         def kron(self, list_of_mats):
                 a = np.array(list_of_mats[0])
@@ -721,7 +754,7 @@ class EgocentricSBM(MutableSequence):
             
         def get_shape(self): return int(self.kron(self.shape))
         
-        def get_pi(self, pi=None):
+        def get_pi(self, pi=None, approx=False):
             if pi is None: return self.kron(self.pi)
             if isinstance(pi, str) and pi=='uni': return (1/self.get_shape())*np.ones([self.get_shape()])
             if len(pi)==self.ndim:
@@ -731,9 +764,10 @@ class EgocentricSBM(MutableSequence):
             if len(pi)!=self.get_shape(): raise ValueError('provide full or factorised pi')
             if not all([0<=p<=1 for p in pi]): raise ValueError('pi must be between 0 and 1 (inclusive)')
             if round(sum(pi), self.precision)!=1: raise ValueError('pi must sum up to 1')
-            return np.array(pi)
+            if approx: return self.apx(pi)
+            else: return np.array(pi)
             
-        def get_psi(self, directed=None, log_ratio=False, sort=False):
+        def get_psi(self, directed=None, log_ratio=False, approx=False, sort=False):
             multiplier = 1/(self.meanomega**(self.ndim-1))
             if self.mode=='ppcollapsed': out = multiplier*self.kron(self.psi)
             elif self.mode=='pp': out = multiplier*np.matmul(self.kron([x[0] for x in self.psi]), self.kron([x[1] for x in self.psi]))
@@ -746,11 +780,12 @@ class EgocentricSBM(MutableSequence):
                 idx = np.argsort(np.diag(out), kind='mergesort')[::-1] #sort by decreasing homophily
                 out = out[idx,:][:,idx]
             if log_ratio: out = np.log2(out) - np.hstack([np.log2(np.diag(out))[:,np.newaxis]]*self.get_shape())
-            return out
+            if approx: return self.apx(out)
+            else: return out
 
-        def find_mean(self, matrix, pi=None): return np.dot(matrix, self.get_pi(pi))
+        def find_mean(self, matrix, pi=None, approx=False): return np.dot(matrix, self.get_pi(pi, approx))
 
-        def generate_people(self, n=100, pi=None): return np.random.multinomial(1, self.get_pi(pi), n)
+        def generate_people(self, n, pi=None): return np.random.multinomial(1, self.get_pi(pi), n)
         
         def generate_network(self, people, directed=None):
             n, d = people.shape
@@ -770,14 +805,17 @@ class EgocentricSBM(MutableSequence):
                 if self.directed: warn('generating an undirected network from a directed SBM', RuntimeWarning)
                 a = np.triu(a)
                 a = a + a.transpose()
-            return (a, p tuple(np.array(self.dims)[keep]))
+            return a, p, keep
         
-        def generate_networkdata(self, n=100, pi=None, directed=False, name='network_data'):
+        def generate_networkdata(self, n, pi=None, directed=False, name='network_data'):
             z = self.generate_people(n, pi)
-            a, p, d = self.generate_network(z, directed)
-            return NetworkData(a, z, d, p, name)
+            a, p, keep = self.generate_network(z, directed)
+            d = np.array(self.dims)
+            d = tuple(d[keep])
+            return NetworkData(a, z[:,keep], d, p, name)
 
-        def generate_networkx(self, n=100, pi=None, directed=False, selfloops=False):
+        def generate_networkx(self, n, pi=None, directed=False, selfloops=False):
+            if not isinstance(n, int): raise TypeError('expected n to be int; got %s'%type(n))
             if selfloops: factor = 1/n
             else: factor = 1/(n-1)
             people = self.generate_people(n, pi).sum(axis=0)
@@ -789,10 +827,11 @@ class EgocentricSBM(MutableSequence):
             try:
                 from networkx import stochastic_block_model 
                 return stochastic_block_model(**params)
-            except:
+            except Exception as err:
+                warn('unable to import stochastic_block_model from networkx; returning dict of stochastic_block_model params', ImportWarning)
                 return params
         
-        def eigvals_pipsi(self, pi=None, directed=None, real=True):
+        def eigvals_pipsi(self, pi=None, directed=None, real=False):
             pi = self.get_pi(pi)
             if real: return sorted(np.real(np.linalg.eigvals(np.matmul(np.diag(pi), self.get_psi(directed)))), reverse=True)
             else: return sorted(np.linalg.eigvals(np.matmul(np.diag(pi), self.get_psi(directed))), reverse=True)
@@ -808,31 +847,31 @@ class EgocentricSBM(MutableSequence):
                 eigs = sorted(tuple(factor*self.kron([(h[0]+h[1]*(s-1),)+(h[0]-h[1],)*(s-1) for (h, s) in zip(self.params, self.shape)])), reverse=True)
             return eigs
         
-        def homoffinity_out(self, pi=None, directed=None, log_ratio=False): return np.diag(self.get_psi(directed, log_ratio))*self.get_pi(pi)
-        def homoffinity_in(self, pi=None, directed=None, log_ratio=False): return self.homoffinity_out(pi, directed, log_ratio)
-        def homoffinity(self, pi=None, directed=None, log_ratio=False): return self.homoffinity_out(pi, directed, log_ratio)
+        def homoffinity_out(self, pi=None, directed=None, log_ratio=False, approx=False): return np.diag(self.get_psi(directed, log_ratio, approx))*self.get_pi(pi, approx)
+        def homoffinity_in(self, pi=None, directed=None, log_ratio=False, approx=False): return self.homoffinity_out(pi, directed, log_ratio, approx)
+        def homoffinity(self, pi=None, directed=None, log_ratio=False, approx=False): return self.homoffinity_out(pi, directed, log_ratio, approx)
             
-        def heteroffinity_out(self, pi=None, directed=None, log_ratio=False): return self.affinity_out(pi, directed, log_ratio)-self.homoffinity_out(pi, directed, log_ratio)
-        def heteroffinity_in(self, pi=None, directed=None, log_ratio=False): return self.affinity_in(pi, directed, log_ratio)-self.homoffinity_in(pi, directed, log_ratio)
-        def heteroffinity(self, pi=None, directed=None, log_ratio=False): return self.affinity(pi, directed, log_ratio)-self.homoffinity(pi, directed, log_ratio)
+        def heteroffinity_out(self, pi=None, directed=None, log_ratio=False, approx=False): return self.affinity_out(pi, directed, log_ratio, approx)-self.homoffinity_out(pi, directed, log_ratio, approx)
+        def heteroffinity_in(self, pi=None, directed=None, log_ratio=False, approx=False): return self.affinity_in(pi, directed, log_ratio, approx)-self.homoffinity_in(pi, directed, log_ratio, approx)
+        def heteroffinity(self, pi=None, directed=None, log_ratio=False, approx=False): return self.affinity(pi, directed, log_ratio, approx)-self.homoffinity(pi, directed, log_ratio, approx)
         
-        def affinity_out(self, pi=None, directed=None, log_ratio=False): return self.find_mean(self.get_psi(directed, log_ratio), pi)
-        def affinity_in(self, pi=None, directed=None, log_ratio=False): return self.find_mean(self.get_psi(directed, log_ratio).transpose(), pi)
-        def affinity(self, pi=None, directed=None, log_ratio=False):
+        def affinity_out(self, pi=None, directed=None, log_ratio=False, approx=False): return self.find_mean(self.get_psi(directed, log_ratio, approx), pi, approx)
+        def affinity_in(self, pi=None, directed=None, log_ratio=False, approx=False): return self.find_mean(self.get_psi(directed, log_ratio, approx).transpose(), pi, approx)
+        def affinity(self, pi=None, directed=None, log_ratio=False, approx=False):
             if self.directed and (directed or directed is None): raise RuntimeError('affinity is ambiguous for directed SBMs; use affinity_in() or affinity_out()')
-            else: return self.affinity_out(pi, directed, log_ratio)
+            else: return self.affinity_out(pi, directed, log_ratio, approx)
         
-        def mean_homoffinity_out(self, pi=None, directed=None, log_ratio=False): return self.find_mean(self.homoffinity_out(pi, directed, log_ratio), pi)
-        def mean_homoffinity_in(self, pi=None, directed=None, log_ratio=False): return self.find_mean(self.homoffinity_in(pi, directed, log_ratio), pi)
-        def mean_homoffinity(self, pi=None, directed=None, log_ratio=False): return self.find_mean(self.homoffinity(pi, directed, log_ratio), pi)
+        def mean_homoffinity_out(self, pi=None, directed=None, log_ratio=False, approx=False): return self.find_mean(self.homoffinity_out(pi, directed, log_ratio, approx), pi, approx)
+        def mean_homoffinity_in(self, pi=None, directed=None, log_ratio=False, approx=False): return self.find_mean(self.homoffinity_in(pi, directed, log_ratio, approx), pi, approx)
+        def mean_homoffinity(self, pi=None, directed=None, log_ratio=False, approx=False): return self.find_mean(self.homoffinity(pi, directed, log_ratio, approx), pi, approx)
         
-        def mean_heteroffinity_out(self, pi=None, directed=None, log_ratio=False): return self.find_mean(self.heteroffinity_out(pi, directed, log_ratio), pi)
-        def mean_heteroffinity_in(self, pi=None, directed=None, log_ratio=False): return self.find_mean(self.heteroffinity_in(pi, directed, log_ratio), pi)
-        def mean_heteroffinity(self, pi=None, directed=None, log_ratio=False): return self.find_mean(self.heteroffinity_out(pi, directed, log_ratio), pi)
+        def mean_heteroffinity_out(self, pi=None, directed=None, log_ratio=False, approx=False): return self.find_mean(self.heteroffinity_out(pi, directed, log_ratio, approx), pi, approx)
+        def mean_heteroffinity_in(self, pi=None, directed=None, log_ratio=False, approx=False): return self.find_mean(self.heteroffinity_in(pi, directed, log_ratio, approx), pi, approx)
+        def mean_heteroffinity(self, pi=None, directed=None, log_ratio=False, approx=False): return self.find_mean(self.heteroffinity_out(pi, directed, log_ratio, approx), pi, approx)
         
-        def mean_affinity_out(self, pi=None, directed=None, log_ratio=False): return self.find_mean(self.affinity_out(pi, directed, log_ratio), pi)
-        def mean_affinity_in(self, pi=None, directed=None, log_ratio=False): return self.find_mean(self.affinity_in(pi, directed, log_ratio), pi)
-        def mean_affinity(self, pi=None, directed=None, log_ratio=False): return self.find_mean(self.affinity_out(pi, directed, log_ratio), pi)
+        def mean_affinity_out(self, pi=None, directed=None, log_ratio=False, approx=False): return self.find_mean(self.affinity_out(pi, directed, log_ratio, approx), pi, approx)
+        def mean_affinity_in(self, pi=None, directed=None, log_ratio=False, approx=False): return self.find_mean(self.affinity_in(pi, directed, log_ratio, approx), pi, approx)
+        def mean_affinity(self, pi=None, directed=None, log_ratio=False, approx=False): return self.find_mean(self.affinity_out(pi, directed, log_ratio, approx), pi, approx)
         
         def floyd_warshall(self, pw_dist_matrix, paths=True):
             if (pw_dist_matrix<0).any(): warn('negative pairwise distances can lead to negative path lengths')
@@ -890,13 +929,13 @@ class EgocentricSBM(MutableSequence):
             if not positivity: metric = metric + np.array([[temp*(len(paths[i][j])-1) for j in range(len(paths[i]))] for i in range(len(paths))])
             return metric
         
-        def sas_individual_pw(self, log_ratio=True, metric_type=None): return self.dis2met(-self.get_psi(log_ratio=log_ratio), metric_type)
-        def sas_individual_out(self, log_ratio=True, metric_type=None, pi=None): return self.find_mean(self.sas_individual_pw(log_ratio, metric_type), pi)
-        def sas_individual_in(self, log_ratio=True, metric_type=None, pi=None): return self.find_mean(self.sas_individual_pw(log_ratio, metric_type).transpose(), pi)
-        def sas_individual(self, log_ratio=True, metric_type=None, pi=None):
+        def sas_individual_pw(self, log_ratio=True, metric_type=None, approx=False): return self.dis2met(-self.get_psi(log_ratio=log_ratio, approx=approx), metric_type)
+        def sas_individual_out(self, log_ratio=True, metric_type=None, pi=None, approx=False): return self.find_mean(self.sas_individual_pw(log_ratio, metric_type, approx), pi, approx)
+        def sas_individual_in(self, log_ratio=True, metric_type=None, pi=None, approx=False): return self.find_mean(self.sas_individual_pw(log_ratio, metric_type, approx).transpose(), pi, approx)
+        def sas_individual(self, log_ratio=True, metric_type=None, pi=None, approx=False):
             if self.directed: raise RuntimeError('individual SAS is ambiguous for directed SBMs; use sas_individual_out() or sas_individual_in()')
-            else: return self.sas_individual_out(log_ratio, metric_type, pi)
-        def sas_global(self, log_ratio=True, metric_type=None, pi=None): return self.find_mean(self.sas_individual_out(log_ratio, metric_type, pi), pi)
+            else: return self.sas_individual_out(log_ratio, metric_type, pi, approx)
+        def sas_global(self, log_ratio=True, metric_type=None, pi=None, approx=False): return self.find_mean(self.sas_individual_out(log_ratio, metric_type, pi, approx), pi, approx)
         
 class NetworkData():
 
@@ -915,11 +954,14 @@ class NetworkData():
         self.set_memberships(membership_matrix, community_names)
         self.set_probability(probability_matrix)
 
+    def get_params(self):
+        return {'name':self.name, 'names':self.names, 'n':self.n, 'k':self.k, 'directed':self.directed, 'adj':self.adj, 'mem':self.mem, 'p':self.p}
+
     def __str__(self):
         out = [['name:', self.name]]
         out.append(['n:', str(self.n)])
         out.append(['k:', str(self.k)])
-        out.append(['directed', str(self.directed)])
+        out.append(['directed:', str(self.directed)])
         out.append(['mean degree:', str(self.mean_degree())])
         width = max([len(i[0])+4 for i in out])
         for i in range(len(out)): out[i] = out[i][0].ljust(width) + out[i][1]
@@ -927,9 +969,15 @@ class NetworkData():
 
     def __len__(self): return self.n
 
+    def __eq__(self, other):
+        if isinstance(other, type(self)):
+            if len(self)==len(other): return (self.adj==other.adj).all()
+            else: return False
+        else: return False
+
     def save(self, filepath=None):
         if filepath is None: filepath = self.name
-        np.savez(filepath, name=self.name, names=self.names, n=self.n, k=self.k, directed=self.directed, adj=self.adj, mem=self.mem, p=self.p)
+        np.savez(filepath, **self.get_params())
 
     def load(self, filepath):
         file = np.load(filepath)
@@ -941,6 +989,15 @@ class NetworkData():
         self.adj = file['adj']
         self.mem = file['mem']
         self.p = file['p']
+
+    def __copy__(self):
+        from tempfile import TemporaryFile
+        fd = TemporaryFile(suffix='.npz')
+        self.save(fd)
+        fd.seek(0)
+        return type(self)(filepath=fd)
+
+    def copy(self): return self.__copy__()
 
     def set_memberships(self, matrix=None, names=None):
         if matrix is None:
