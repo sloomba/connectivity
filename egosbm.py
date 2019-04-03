@@ -785,7 +785,9 @@ class EgocentricSBM(MutableSequence):
 
         def find_mean(self, value, pi=None, approx=False): return np.dot(value, self.get_pi(pi, approx))
 
-        def find_var(self, value, pi=None, approx=False):
+        def find_var(self, value, pi=None, approx=False): return np.dot((value - self.find_mean(value, pi, approx))**2, self.get_pi(pi, approx))
+
+        def find_covar(self, value, pi=None, approx=False):
             pi = self.get_pi(pi, approx)
             cov = np.diag(pi)-np.dot(pi[:,np.newaxis], pi[np.newaxis,:]) #a covariance-type matrix
             return np.dot(value, cov)
@@ -942,7 +944,7 @@ class EgocentricSBM(MutableSequence):
             else: return self.sas_individual_out(log_ratio, metric_type, pi, approx)
         def sas_global(self, log_ratio=True, metric_type=None, pi=None, approx=False):
             sas = self.sas_individual_out(log_ratio, metric_type, pi, approx)
-            return self.find_mean(sas, pi, approx), sum(abs(self.find_var(sas, pi, approx)))
+            return self.find_mean(sas, pi, approx), self.find_var(sas, pi, approx)
         
 class NetworkData():
 
