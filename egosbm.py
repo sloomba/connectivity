@@ -783,7 +783,12 @@ class EgocentricSBM(MutableSequence):
             if approx: return self.apx(out)
             else: return out
 
-        def find_mean(self, matrix, pi=None, approx=False): return np.dot(matrix, self.get_pi(pi, approx))
+        def find_mean(self, value, pi=None, approx=False): return np.dot(value, self.get_pi(pi, approx))
+
+        def find_var(self, value, pi=None, approx=False):
+            pi = self.get_pi(pi, approx)
+            cov = np.diag(pi)-np.dot(pi[:,np.newaxis], pi[np.newaxis,:]) #a covariance-type matrix
+            return np.dot(value, cov)
 
         def generate_people(self, n, pi=None): return np.random.multinomial(1, self.get_pi(pi), n)
         
@@ -935,7 +940,9 @@ class EgocentricSBM(MutableSequence):
         def sas_individual(self, log_ratio=True, metric_type=None, pi=None, approx=False):
             if self.directed: raise RuntimeError('individual SAS is ambiguous for directed SBMs; use sas_individual_out() or sas_individual_in()')
             else: return self.sas_individual_out(log_ratio, metric_type, pi, approx)
-        def sas_global(self, log_ratio=True, metric_type=None, pi=None, approx=False): return self.find_mean(self.sas_individual_out(log_ratio, metric_type, pi, approx), pi, approx)
+        def sas_global(self, log_ratio=True, metric_type=None, pi=None, approx=False):
+            sas = self.sas_individual_out(log_ratio, metric_type, pi, approx)
+            return self.find_mean(sas, pi, approx), sum(abs(self.find_var(sas, pi, approx)))
         
 class NetworkData():
 
