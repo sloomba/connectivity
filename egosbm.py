@@ -145,11 +145,30 @@ class EgocentricSBM(MutableSequence):
             key = self.dimsdict[key]
         else:
             if isinstance(key, int):
-                if key<0: key += self.ndim
+                if key<0 and key>=-self.ndim: key += self.ndim
                 if key>=0 and key<self.ndim: pass
                 else: raise IndexError('sbm index out of range; must be less than ndims')
             else: raise KeyError('sbm key "%s" not found; must be dimension name'%key)
         return key
+
+    def get_block(self, key, blocks=None):
+        key = self.get_key(key)
+        if blocks is None: blocks = range(self.shape[key])
+        if not self.iterable(blocks): blocks = [blocks]
+        block_names = dict(zip(self.dims[key][1], range(self.shape[key])))
+        if len(block_names)!=self.shape[key]: warn('dimension %d has duplicate block names; last index of blocks matched to same name is returned'%key, RuntimeWarning)
+        block_index = list()
+        for blk in blocks:
+            if blk in block_names: block_index.append(block_names[blk])
+            else:
+                if isinstance(blk, int):
+                    if blk<0 and blk>=-self.shape[key]: blk += self.shape[key]
+                    if blk>=0 and blk<self.shape[key]: pass
+                    else: raise IndexError('dim index out of range; must be less than size of dimension %d'%key)
+                else: raise KeyError('dim key "%s" not found; must be block name of dimension %d'%(blk, key))
+                block_index.append(blk)
+        if len(block_index)==1: return block_index[0]
+        else: return tuple(block_index)
 
     def keys(self): return tuple(self.dimsdict.keys())
 
@@ -445,28 +464,28 @@ class EgocentricSBM(MutableSequence):
         if omega is None: omega = self.omega
         if rho is None: rho = self.rho
         #pi tests
-        if not self.iterable(pi): raise TypeError('pi must be an interable')
+        if not self.iterable(pi): raise TypeError('pi must be an iterable')
         if len(pi)!=self.ndim: raise ValueError('provide pi for every dimension')
         for i in range(len(pi)):
-            if not self.iterable(pi[i]): raise TypeError('pi for dimension %s must be an interable'%i)
+            if not self.iterable(pi[i]): raise TypeError('pi for dimension %s must be an iterable'%i)
             if len(pi[i])!=self.shape[i]: raise ValueError('provide pi for all blocks of dimension %s'%i)
             if not all([0<j<=1 for j in pi[i]]): raise ValueError('pi must be between 0 (exclusive) and 1 (inclusive); see dimension %s'%i)
         if not all([p==1 for p in self.sum_pi(pi=pi, approx=True)]): raise ValueError('pi must sum up to 1')
         #omega tests
-        if not self.iterable(omega): raise TypeError('omega must be an interable')
+        if not self.iterable(omega): raise TypeError('omega must be an iterable')
         if len(omega)!=self.ndim: raise ValueError('provide omega for every dimension')
         for i in range(len(omega)):
-            if not self.iterable(omega[i]): raise TypeError('omega for dimension %s must be an interable'%i)
+            if not self.iterable(omega[i]): raise TypeError('omega for dimension %s must be an iterable'%i)
             if len(omega[i])!=self.shape[i]: raise ValueError('provide omega for all blocks of dimension %s'%i)
             if not all([0<=j for j in omega[i]]): raise ValueError('omega must be >=0; see dimension %s'%i)
         mean_omega = self.mean_omega(omega=omega, pi=pi, approx=True, collapse=False)
         for i in range(1, len(mean_omega)):
             if not mean_omega[i] == mean_omega[0]: raise ValueError('mean omega must remain same')
         #rho tests
-        if not self.iterable(rho): raise TypeError('rho must be an interable')
+        if not self.iterable(rho): raise TypeError('rho must be an iterable')
         if len(rho)!=self.ndim: raise ValueError('provide rho for every dimension')
         for i in range(len(rho)):
-            if not self.iterable(rho[i]): raise TypeError('rho for dimension %s must be an interable'%i)
+            if not self.iterable(rho[i]): raise TypeError('rho for dimension %s must be an iterable'%i)
             if len(rho[i])!=self.shape[i]: raise ValueError('provide rho for all blocks of dimension %s'%i)
             if not all([0<=j<=1 for j in rho[i]]): raise ValueError('rho must be between 0 and 1 (inclusive); see dimension %s'%i)
 
@@ -645,6 +664,83 @@ class EgocentricSBM(MutableSequence):
         self.set_rho(rho)
         
     def enforce_ambiphily(self): self.set_rho(self.pi)
+
+    def merge_blocks(self, key, blocks, name=None, inplace=True):
+        key = self.get_key(key)
+        blocks = self.get_block(key, blocks)
+        if not blocks or not self.iterable(blocks): raise TypeError('expected at least 2 blocks to be merged together')
+        shape = list(self.shape)
+        shape[key] += 1-len(blocks) 
+        dims = list(self.dims)
+        dims[key] = list(dims[key])
+        dims[key][1] = list(dims[key][1])
+        dims_new = list()
+        pi = list(self.pi)
+        pi[key] = list(pi[key])
+        pi_new = list()
+        rho = list(self.rho)
+        rho[key] = list(rho[key])
+        rho_new = list()
+        omega = list(self.omega)
+        omega[key] = list(omega[key])
+        omega_new = list()
+        new_idx = blocks[0]
+        blocks = sorted(blocks)
+        for i in range(len(blocks)):
+            dims_new.append(dims[key][1].pop(blocks[i]-i))
+            pi_new.append(pi[key].pop(blocks[i]-i))
+            rho_new.append(rho[key].pop(blocks[i]-i))
+            omega_new.append(omega[key].pop(blocks[i]-i))
+        sum_pi = sum(pi_new)
+        sum_om = sum([p*o for p, o in zip(pi_new, omega_new)])
+        if name is None: name = ' | '.join(['('+str(b)+')' for b in dims_new])
+        dims[key][1].insert(new_idx, name)
+        pi[key].insert(new_idx, sum_pi)
+        omega[key].insert(new_idx, sum_om/sum_pi)
+        rho[key].insert(new_idx, sum([p*o*r + p*o*(sum_pi-p)*(1-r)/(1-p) for p, o, r in zip(pi_new, omega_new, rho_new)])/sum_om)
+        if inplace: self.set_params({'shape':shape, 'dims':dims, 'pi':pi, 'rho':rho, 'omega':omega})
+        else:
+            x = self.copy()
+            x.set_params({'shape':shape, 'dims':dims, 'pi':pi, 'rho':rho, 'omega':omega})
+            return x
+
+    def split_block(self, key, block, pi_split=None, names=None, inplace=True):
+        key = self.get_key(key)
+        block = self.get_block(key, block)
+        if self.iterable(block): raise TypeError('expected exactly 1 block to be split at a time')
+        if pi_split is None: pi_split = [1.0]
+        if not self.iterable(pi_split): raise TypeError('pi_split (splitting proportions) must be an iterable')
+        if not all([0<i<=1 for i in pi_split]): raise ValueError('pi_split (splitting proportions) must be between 0 (exclusive) and 1 (inclusive)')
+        if not all([p==1 for p in self.sum_pi(pi=[pi_split], approx=True)]): raise ValueError('pi_split (splitting proportions) must sum up to 1')
+        num_splits = len(pi_split)
+        if num_splits==1: return
+        shape = list(self.shape)
+        shape[key] += num_splits-1
+        dims = list(self.dims)
+        dims[key] = list(dims[key])
+        dims[key][1] = list(dims[key][1])
+        dims_new = str(dims[key][1].pop(block))
+        if names is None: names = [dims_new+' # '+str(i+1) for i in range(num_splits)]
+        if not self.iterable(names) or len(names)!=num_splits: raise TypeError('expected names for exactly %d new blocks'%num_splits)
+        pi = list(self.pi)
+        pi[key] = list(pi[key])
+        pi_new = pi[key].pop(block)
+        rho = list(self.rho)
+        rho[key] = list(rho[key])
+        rho_new = rho[key].pop(block)
+        omega = list(self.omega)
+        omega[key] = list(omega[key])
+        omega_new = omega[key].pop(block)
+        for i in range(num_splits):
+            dims[key][1].insert(block+i, names[i])
+            pi[key].insert(block+i, pi_new*pi_split[i])
+            rho[key].insert(block+i, rho_new*pi_split[i])
+            omega[key].insert(block+i, omega_new)
+        if inplace: self.set_params({'shape':shape, 'dims':dims, 'pi':pi, 'rho':rho, 'omega':omega})
+        else:
+            x = self.copy()
+            x.set_params({'shape':shape, 'dims':dims, 'pi':pi, 'rho':rho, 'omega':omega})
+            return x
     
     def get_model(self, mode='full', directed=True, name='sbm'): return self.StochasticBlockModel(self, mode=mode, directed=directed, name=name)
     
