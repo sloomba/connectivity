@@ -140,20 +140,27 @@ class EgocentricSBM(MutableSequence):
             if blocks: idx_blocks = [[x[0] for x in y] for y in idx_blocks]
             return idx_dims, idx_blocks
     
-    def get_key(self, key):
-        if key in self.dimsdict:
-            key = self.dimsdict[key]
-        else:
-            if isinstance(key, int):
-                if key<0 and key>=-self.ndim: key += self.ndim
-                if key>=0 and key<self.ndim: pass
-                else: raise IndexError('sbm index out of range; must be less than ndims')
-            else: raise KeyError('sbm key "%s" not found; must be dimension name'%key)
-        return key
+    def get_key(self, keys=None):
+        if keys is None: return tuple(range(self.ndim))
+        if not self.iterable(keys): keys = [keys]
+        key_index = list()
+        for key in keys:
+            if key in self.dimsdict:
+                key_index.append(self.dimsdict[key])
+            else:
+                if isinstance(key, int):
+                    if key<0 and key>=-self.ndim: key += self.ndim
+                    if key>=0 and key<self.ndim: pass
+                    else: raise IndexError('sbm index out of range; must be less than ndims')
+                else: raise KeyError('sbm key "%s" not found; must be dimension name'%key)
+                key_index.append(key)
+        if len(key_index)==1: return key_index[0]
+        else: return tuple(key_index)
 
     def get_block(self, key, blocks=None):
         key = self.get_key(key)
-        if blocks is None: blocks = range(self.shape[key])
+        if self.iterable(key): raise ValueError('expected a single key to retrieve blocks for')
+        if blocks is None: return tuple(range(self.shape[key]))
         if not self.iterable(blocks): blocks = [blocks]
         block_names = dict(zip(self.dims[key][1], range(self.shape[key])))
         if len(block_names)!=self.shape[key]: warn('dimension %d has duplicate block names; last index of blocks matched to same name is returned'%key, RuntimeWarning)
@@ -169,6 +176,11 @@ class EgocentricSBM(MutableSequence):
                 block_index.append(blk)
         if len(block_index)==1: return block_index[0]
         else: return tuple(block_index)
+
+    def get_name(self, key):
+        key = self.get_key(key)
+        if self.iterable(key): return tuple([self.dims[k][1] for k in key])
+        else: return self.dims[key][1]
 
     def keys(self): return tuple(self.dimsdict.keys())
 
@@ -396,9 +408,29 @@ class EgocentricSBM(MutableSequence):
         if isinstance(other, float) or isinstance(other, int): return self.scale(1/other, inplace=False)
         else: raise TypeError('can only divide "EgocentricSBM" by "int" or "float"')
 
-    def ishomophilous(self): return tuple([tuple([u<v for u,v in zip(i,j)]) for i,j in zip(self.pi, self.rho)])
-    def isheterophilous(self): return tuple([tuple([u>v for u,v in zip(i,j)]) for i,j in zip(self.pi, self.rho)])
-    def isambiphilous(self): return tuple([tuple([u==v for u,v in zip(i,j)]) for i,j in zip(self.pi, self.rho)])
+    def flatten(self, inplace=True):
+        if len(self)>1:
+            out = type(self)(self[0])
+            for i in range(1, len(self)):
+                out *= type(self)(self[i])
+            out.scale(1/(self.mean_omega()**(len(self)-1)))
+            out.name = '/'+self.name+'\\'
+            if inplace: self.set_params(out.get_params())
+            else: return out
+        elif not inplace: return self.copy()
+
+    def homophily(self, log=True):
+        if log:
+            def try_log(x):
+                from math import log2
+                try: return log2(x)
+                except: return -float('inf')
+            return [[try_log(v)-try_log(u) for u,v in zip(i,j)] for i,j in zip(self.pi, self.rho)]
+        else: return [[v/u for u,v in zip(i,j)] for i,j in zip(self.pi, self.rho)]
+
+    def ishomophilous(self): return [[u<v for u,v in zip(i,j)] for i,j in zip(self.apx(self.pi), self.apx(self.rho))]
+    def isheterophilous(self): return [[u>v for u,v in zip(i,j)] for i,j in zip(self.apx(self.pi), self.apx(self.rho))]
+    def isambiphilous(self): return [[u==v for u,v in zip(i,j)] for i,j in zip(self.apx(self.pi), self.apx(self.rho))]
     
     def iterable(self, obj):
         if isinstance(obj, str): return False
@@ -442,6 +474,16 @@ class EgocentricSBM(MutableSequence):
     def mean_omega(self, omega=None, pi=None, approx=False, collapse=True):
         if omega is None: omega = self.omega
         return self.find_mean(omega, pi, approx, collapse)
+
+    def correct_omega(self, omega, pi=None):
+        omega = list(omega)
+        mean_omega = self.mean_omega(omega, pi, collapse=False)
+        mo = sum(mean_omega)/len(mean_omega)
+        for i in range(len(omega)):
+            omega[i] = list(omega[i])
+            for j in range(len(omega[i])):
+                omega[i][j] *= mo/mean_omega[i]
+        return omega
     
     def mean_homophily(self, rho=None, pi=None, approx=False, collapse=False): return self.mean_rho(rho, pi, approx, collapse)
     
@@ -668,7 +710,9 @@ class EgocentricSBM(MutableSequence):
     def merge(self, key, blocks, name=None, inplace=True):
         key = self.get_key(key)
         blocks = self.get_block(key, blocks)
-        if not blocks or not self.iterable(blocks): raise TypeError('expected at least 2 blocks to be merged together')
+        if not blocks or not self.iterable(blocks):
+            warn('expected at least 2 blocks to be merged together, no merge performed for dim %s'%str(key), RuntimeWarning)
+            return
         shape = list(self.shape)
         shape[key] += 1-len(blocks) 
         dims = list(self.dims)
@@ -813,7 +857,9 @@ class EgocentricSBM(MutableSequence):
     def split_inverse(self, key, blocks, name=None, inplace=True):
         key = self.get_key(key)
         blocks = self.get_block(key, blocks)
-        if not blocks or not self.iterable(blocks): raise TypeError('expected at least 2 blocks to be merged together')
+        if not blocks or not self.iterable(blocks):
+            warn('expected at least 2 blocks to be merged together, no split-inverse performed for dim %s'%str(key), RuntimeWarning)
+            return
         shape = list(self.shape)
         shape[key] += 1-len(blocks) 
         dims = list(self.dims)
@@ -848,23 +894,61 @@ class EgocentricSBM(MutableSequence):
             x = self.copy()
             x.set_params({'shape':shape, 'dims':dims, 'pi':pi, 'rho':rho, 'omega':omega})
             return x
+
+    def compress(self, keys=None, thresh=0.1, inplace=True):
+        def foo(ego, key):
+            f = []
+            for i in range(ego.shape[key]):
+                for j in range(i):
+                    p_i = ego.pi[key][i]
+                    p_j = ego.pi[key][j]                    
+                    r_i = ego.rho[key][i]
+                    r_j = ego.rho[key][j]
+                    o_i = ego.omega[key][i]
+                    o_j = ego.omega[key][j]
+                    p = p_i+p_j
+                    rp = p_i*o_i*(r_i+(p-p_i)*(1-r_i)/(1-p_i))
+                    rp += p_j*o_j*(r_j+(p-p_j)*(1-r_j)/(1-p_j))
+                    rp /= (p_i*o_i+p_j*o_j)
+                    f.append((abs(rp-(r_i*p_i+r_j*p_j))*p, i, j))
+            return f
+        keys = self.get_key(keys)
+        if not self.iterable(keys): keys = [keys]
+        tmp = self.copy()
+        for key in keys:
+            aff = tmp.homophily()[key]
+            aff_inf = [i for i in range(len(aff)) if aff[i]==-float('inf')] #merge all perfectly heterophilous communities together
+            if aff_inf: tmp.merge(key, aff_inf)
+            while True:
+                obj = foo(tmp, key)
+                if obj: min_v, min_i, min_j = min(obj, key=lambda x: x[0])
+                else: break
+                if min_v<=thresh: tmp.merge(key, [min_i, min_j])
+                else: break
+        tmp.name = '>'+self.name+'<'
+        if inplace:
+            tmp_ho = tmp.mean_homophily()
+            ori_ho = self.mean_homophily()
+            names = self.keys()
+            shape = self.shape
+            self.set_params(tmp.get_params())
+            return tuple([(names[key], {'loss':round(ori_ho[key]-tmp_ho[key],3), 'rate':round(1-tmp.shape[key]/shape[key],3)}) for key in keys])
+        else: return tmp
     
-    def get_model(self, mode='full', directed=True, name='sbm'): return self.StochasticBlockModel(self, mode=mode, directed=directed, name=name)
+    def get_model(self, mode='full', directed=True, name=None): return self.StochasticBlockModel(self, mode=mode, directed=directed, name=name)
     
     class StochasticBlockModel():
         
         def __init__(self, ego=None, mode='full', directed=True, name=None, filepath=None):
             
-            if isinstance(ego, str):
-                filepath = ego
-                ego = EgocentricSBM()
-                ego.load(filepath)
+            if isinstance(ego, str): ego = EgocentricSBM(filepath=ego)
             elif ego is None:
-                if filepath is None: raise ValueError('either provide "ego" as a valid EgocentricSBM, or as the path to an .ego file, or provide "filepath" to an .npz file containing the model ')
+                if filepath is None: raise ValueError('either provide "ego" as a valid EgocentricSBM, or as the path to an .ego file containing a valid EgocentricSBM, or provide "filepath" to an .npz file containing a valid StochasticBlockModel')
                 self.load(filepath)
                 if name is not None: self.name = str(name)
                 return
             if mode not in ['full', 'pp', 'ppcollapsed']: raise ValueError('invalid model mode "%s"'%mode)
+            if name is None: name = ego.name + '.sbm'
             self.mode = mode
             self.name = str(name)
             self.ndim = ego.ndim
@@ -997,17 +1081,31 @@ class EgocentricSBM(MutableSequence):
             if approx: return self.apx(out)
             else: return out
 
-        def find_mean(self, value, pi=None, approx=False): return np.dot(value.transpose(), self.get_pi(pi, approx))
+        def find_mean(self, value, pi=None, approx=False): return np.dot(value, self.get_pi(pi, approx))
 
         def find_var(self, value, pi=None, mean=None, approx=False):
             if mean is None: mean = self.find_mean(value, pi, approx)
-            return self.find_mean((value - mean)**2, pi, approx)
+            try:
+                if len(mean.shape)==2: mean = np.diag(mean) #for multiple pi
+            except: pass
+            try:
+                if len(value.shape)==1: value = np.vstack([value]*mean.shape[0]) #for static SAS
+                if len(mean.shape)==1: mean = mean[:,np.newaxis] #for apt broadcasting
+            except: pass
+            var = self.find_mean((value - mean)**2, pi, approx)
+            try:
+                if len(var.shape)==2: var = np.diag(var)
+            except: pass
+            return var
 
         def find_covar(self, value=1, pi=None, approx=False):
-            pi = self.get_pi(pi, approx).flatten()
-            if len(pi)!=self.get_shape(): raise ValueError('expected only one pi sample to compute covariance around')
-            cov = np.diag(pi)-np.dot(pi[:,np.newaxis], pi[np.newaxis,:]) #a covariance-type matrix
-            return np.dot(value.transpose(), cov)
+            pi = self.get_pi(pi, approx)
+            if len(pi.shape)==1: return np.dot(value, np.diag(pi)-np.dot(pi[:,np.newaxis], pi[np.newaxis,:])) #a covariance matrix
+            else:
+                cov = []
+                for i in range(pi.shape[1]):
+                    cov.append(np.dot(value, np.diag(pi[:,i])-np.dot(pi[:,i][:,np.newaxis], pi[:,i][np.newaxis,:])))
+                return np.dstack(cov)
 
         def generate_people(self, n, pi=None): return np.random.multinomial(1, self.get_pi(pi), n)
         
@@ -1031,11 +1129,12 @@ class EgocentricSBM(MutableSequence):
                 a = a + a.transpose()
             return a, p, keep
         
-        def generate_networkdata(self, n, pi=None, directed=False, name='network_data'):
+        def generate_networkdata(self, n, pi=None, directed=False, name=None):
             z = self.generate_people(n, pi)
             a, p, keep = self.generate_network(z, directed)
             d = np.array(self.dims)
             d = tuple(d[keep])
+            if name is None: name = self.name + '.net'
             return NetworkData(a, z[:,keep], d, p, name)
 
         def generate_networkx(self, n, pi=None, directed=False, selfloops=False):
@@ -1159,19 +1258,27 @@ class EgocentricSBM(MutableSequence):
         def sas_individual(self, log_ratio=True, metric_type=None, pi=None, approx=False):
             if self.directed: raise RuntimeError('individual SAS is ambiguous for directed SBMs; use sas_individual_out() or sas_individual_in()')
             else: return self.sas_individual_out(log_ratio, metric_type, pi, approx)
-        def sas_global(self, log_ratio=True, metric_type=None, pi=None, approx=False):
-            sas = self.sas_individual_out(log_ratio, metric_type, pi, approx)
-            return self.find_mean(sas, pi, approx), self.find_var(sas, pi, approx)
+        def sas_global(self, log_ratio=True, metric_type=None, pi=None, static=False, approx=False):
+            if static: sas = self.sas_individual_out(log_ratio, metric_type, None, approx)
+            else: sas = self.sas_individual_out(log_ratio, metric_type, pi, approx)
+            sas_mean = self.find_mean(sas.transpose(), pi, approx)
+            try:
+                if len(sas_mean.shape)==2: sas_mean = np.diag(sas_mean)
+            except: pass
+            sas_var = self.find_var(sas.transpose(), pi, sas_mean, approx)
+            return sas_mean, sas_var
 
-        def generate_barcode(self, pi=None, n=float('inf')): return self.Barcode(self, pi, n)
+        def generate_barcode(self, pi=None, n=float('inf'), name=None): return self.Barcode(self, pi, n, name)
 
         class Barcode():
 
-            def __init__(self, sbm, pi=None, n=float('inf')):
-                if isinstance(sbm, str):
-                    filepath = sbm
-                    sbm = EgocentricSBM()
-                    sbm.load(filepath)
+            def __init__(self, sbm=None, pi=None, n=float('inf'), name=None, filepath=None):
+                if isinstance(sbm, str): sbm = EgocentricSBM.StochasticBlockModel(filepath=sbm)
+                elif sbm is None:
+                    if filepath is None: raise ValueError('either provide "sbm" as a valid StochasticBlockModel, or as the path to an .npz file containing a valid StochasticBlockModel, or provide "filepath" to an .npz file containing a valid Barcode')
+                    self.load(filepath)
+                    if name is not None: self.name = str(name)
+                    return
                 k = len(sbm)
                 idx = np.triu_indices(k)
                 psi = -sbm.get_psi(directed=False, approx=True) #distances for Veitoris-Rips complex
@@ -1181,92 +1288,126 @@ class EgocentricSBM(MutableSequence):
                 psi = psi[idx_sort]
                 idx_row = idx[0][idx_sort]
                 idx_col = idx[1][idx_sort]
-                pi = sbm.get_pi(pi)
-                if len(pi.shape)==2:
-                    num_pi = pi.shape[1]
-                    if num_pi==1: pi = pi.flatten()
-                else: num_pi = 1
                 path_matrix = np.zeros((k, k), dtype=bool)
-                edge_list = ['']*num
-                if num_pi==1:
-                    complex_1 = 0 #number of 1-complexes (edges)
-                    betti_0 = 1 #Betti number 0 (number of connected components)
-                    betti_0_curve = np.zeros(num)
-                    betti_1_curve = np.zeros(num)
-                else:
-                    complex_1 = np.zeros(num_pi)
-                    betti_0 = np.ones(num_pi)
-                    betti_0_curve = np.zeros((num, num_pi))
-                    betti_1_curve = np.zeros((num, num_pi))
-                if n==float('inf'):
-                    for i in range(num):
-                        p = idx_row[i]
-                        q = idx_col[i]
-                        if p==q: #intra-community closure
-                            complex_1 += pi[p]**2/2 #increment number of edges
-                            if not path_matrix[p,:].any(): betti_0 -= pi[p] #decrease number of connected components
-                            else: pass #p was already in a larger component
-                        else:  #inter-community closure
-                            complex_1 += pi[p]*pi[q] #increment number of edges
-                            if not path_matrix[p,:].any(): betti_0 -= pi[p]
-                            if not path_matrix[q,:].any(): betti_0 -= pi[q]
-                        betti_0_curve[i] = betti_0
-                        betti_1_curve[i] = complex_1
-                        path_matrix[p,q] = True #p can reach q
-                        path_matrix[q,p] = True #q can reach p
-                        path_matrix[p,:] |= path_matrix[q,:] #everything that can be reached by q can be reached by p
-                        path_matrix[q,:] |= path_matrix[p,:] #everything that can be reached by p can be reached by q
-                        path_matrix[path_matrix[:,p],:] |= path_matrix[p,:] #everything that can reach p can reach everything reached by p
-                        path_matrix[path_matrix[:,q],:] |= path_matrix[q,:] #everything that can reach q can reach everything reached by q
-                        edge_list[i] = str(p)+'-'+str(q)
-                else:
-                    if (n*pi<10).any(): warn('unexpected output possible when n*pi_i>>1 does not hold for some community i', RuntimeWarning)
-                    complex_0 = n #number of 0-complexes (nodes)
-                    betti_0 *= n #Betti number 0 (number of connected components)
-                    for i in range(num):
-                        p = idx_row[i]
-                        q = idx_col[i]
-                        if p==q: #intra-community closure
-                            complex_1 += n*pi[p]*(n*pi[p]-1)/2 #increment number of edges
-                            if not path_matrix[p,:].any(): betti_0 -= n*pi[p]-1 #decrease number of connected components
-                            else: pass #p was already in a larger component
-                        else:  #inter-community closure
-                            complex_1 += n**2*pi[p]*pi[q] #increment number of edges
-                            if path_matrix[p,:].any() and path_matrix[q,:].any():
-                                if not path_matrix[p,q]: betti_0 -= 1 #decrease number of connected components only if p-q were previously in different connected components
-                            elif (not path_matrix[p,:].any()) and path_matrix[q,:].any(): betti_0 -= n*pi[p] #p gets absorbed in component of q
-                            elif path_matrix[p,:].any() and (not path_matrix[q,:].any()): betti_0 -= n*pi[q] #q gets absorbed in component of p
-                            else: betti_0 -= n*(pi[p]+pi[q])-1 #p and q form their own connected component
-                        betti_0_curve[i] = betti_0
-                        betti_1_curve[i] = betti_0 - complex_0 + complex_1 #from Euler's characteristic: k-n+m
-                        path_matrix[p,q] = True #p can reach q
-                        path_matrix[q,p] = True #q can reach p
-                        path_matrix[p,:] |= path_matrix[q,:] #everything that can be reached by q can be reached by p
-                        path_matrix[q,:] |= path_matrix[p,:] #everything that can be reached by p can be reached by q
-                        path_matrix[path_matrix[:,p],:] |= path_matrix[p,:] #everything that can reach p can reach everything reached by p
-                        path_matrix[path_matrix[:,q],:] |= path_matrix[q,:] #everything that can reach q can reach everything reached by q
-                        edge_list[i] = str(p)+'-'+str(q)
+                edge_list = list()
+                conn_list = list()
+                for i in range(num):
+                    p = idx_row[i]
+                    q = idx_col[i]
+                    edge_list.append(((p, q),))
+                    if p==q: conn_list.append((path_matrix[p,:].any(),))
+                    else: conn_list.append(((path_matrix[p,:].any(), path_matrix[q,:].any(), path_matrix[p,q]), ))
+                    path_matrix[p,q] = True #p can reach q
+                    path_matrix[q,p] = True #q can reach p
+                    path_matrix[p] |= path_matrix[q] #everything that can be reached by q can be reached by p
+                    path_matrix[q] |= path_matrix[p] #everything that can be reached by p can be reached by q
+                    path_matrix[path_matrix[p]] |= path_matrix[p] #everything that can reach p can reach everything reached by p
+                    path_matrix[path_matrix[q]] |= path_matrix[q] #everything that can reach q can reach everything reached by q
                 del_psi = np.diff(psi)
                 keep = np.append(del_psi!=0, True)
                 if not keep.all():
                     psi = psi[keep]
-                    betti_0_curve = betti_0_curve[keep]
-                    betti_1_curve = betti_1_curve[keep]
                     dummy = 0
                     for i in range(num):
                         if not keep[i]:
-                            temp = edge_list.pop(i-dummy)
-                            edge_list[i-dummy] = temp+' & '+edge_list[i-dummy]
+                            edge_list[i-dummy] += edge_list.pop(i-dummy+1)
+                            conn_list[i-dummy] += conn_list.pop(i-dummy+1)
                             dummy += 1
-                self.n = n
+                if name is None: name = sbm.name + '.bar'
+                self.name = str(name)
                 self.k = k
-                self.pi = pi
                 self.epsilon = psi
-                self.betti0 = betti_0_curve
-                self.betti1 = betti_1_curve
-                self.events = edge_list
+                self.event = tuple(edge_list)
+                self.state = tuple(conn_list)
+                self._n = float(n)
+                self._pi = sbm.get_pi(pi)
+                self.reset()
 
             def __len__(self): return len(self.epsilon)
+
+            def set(self, pi=None, n=None):
+                if pi is None: pi = self.pi
+                if n is None: n = self.n
+                pi = np.array(pi)
+                if len(pi.shape)==0 or len(pi.shape)>2: raise ValueError('expected pi to be a 1d or 2d matrix')
+                elif len(pi.shape)==2:
+                    num_pi = pi.shape[1]
+                    if num_pi==1: pi = pi.flatten()
+                else: num_pi = 1
+                if pi.shape[0]!=self.k: raise ValueError('expected pi to have %d entries, but it contains %d entries'%(self.k, pi.shape[0]))
+                num = len(self)
+                if num_pi==1:
+                    complex_1 = 0 #number of 1-complexes (edges)
+                    betti_0 = 1 #Betti number 0 (number of connected components)
+                    betti_0_curve = np.zeros(num, dtype=np.float32)
+                    betti_1_curve = np.zeros(num, dtype=np.float32)
+                else:
+                    complex_1 = np.zeros(num_pi, dtype=np.float32)
+                    betti_0 = np.ones(num_pi, dtype=np.float32)
+                    betti_0_curve = np.zeros((num, num_pi), dtype=np.float32)
+                    betti_1_curve = np.zeros((num, num_pi), dtype=np.float32)
+                if n==float('inf'):
+                    for i in range(num):
+                        for j in range(len(self.event[i])):
+                            p, q = self.event[i][j]
+                            if p==q: #intra-community closure
+                                complex_1 += pi[p]**2/2 #increment number of edges
+                                if not self.state[i][j]: betti_0 -= pi[p] #decrease number of connected components
+                                else: pass #p was already in a larger component
+                            else:  #inter-community closure
+                                complex_1 += pi[p]*pi[q] #increment number of edges
+                                if not self.state[i][j][0]: betti_0 -= pi[p]
+                                if not self.state[i][j][1]: betti_0 -= pi[q]
+                        betti_0_curve[i] = betti_0
+                        betti_1_curve[i] = complex_1
+                else:
+                    n = float(n)
+                    if n<=0: raise ValueError('expected n to be a positive numeric')
+                    if (n*pi<10).any(): warn('unexpected output possible when n*pi_i>>1 does not hold for some community i', RuntimeWarning)
+                    complex_0 = n #number of 0-complexes (nodes)
+                    betti_0 *= n #Betti number 0 (number of connected components)
+                    for i in range(num):
+                        for j in range(len(self.event[i])):
+                            p, q = self.event[i][j]
+                            if p==q: #intra-community closure
+                                complex_1 += n*pi[p]*(n*pi[p]-1)/2 #increment number of edges
+                                if not self.state[i][j]: betti_0 -= n*pi[p]-1 #decrease number of connected components
+                                else: pass #p was already in a larger component
+                            else:  #inter-community closure
+                                complex_1 += n**2*pi[p]*pi[q] #increment number of edges
+                                if self.state[i][j][0] and self.state[i][j][1]:
+                                    if not self.state[i][j][2]: betti_0 -= 1 #decrease number of connected components only if p-q were previously in different connected components
+                                elif (not self.state[i][j][0]) and self.state[i][j][1]: betti_0 -= n*pi[p] #p gets absorbed in component of q
+                                elif self.state[i][j][0] and (not self.state[i][j][1]): betti_0 -= n*pi[q] #q gets absorbed in component of p
+                                else: betti_0 -= n*(pi[p]+pi[q])-1 #p and q form their own connected component
+                        betti_0_curve[i] = betti_0
+                        betti_1_curve[i] = betti_0 - complex_0 + complex_1 #from Euler's characteristic: k-n+m
+                self.n = n
+                self.pi = pi
+                self.betti0 = betti_0_curve
+                self.betti1 = betti_1_curve
+
+            def reset(self): self.set(self._pi, self._n)
+
+            def get_params(self): return {'name':self.name, 'k':self.k, 'epsilon':self.epsilon, 'event':self.event, 'state':self.state, '_n':self._n, '_pi':self._pi, 'n':self.n, 'pi':self.pi, 'betti0':self.betti0, 'betti1':self.betti1}
+
+            def save(self, filepath=None):
+                if filepath is None: filepath = self.name
+                np.savez(filepath, **self.get_params())
+
+            def load(self, filepath):
+                file = np.load(filepath)
+                self.name = str(file['name'])
+                self.k = int(file['k'])
+                self.epsilon = file['epsilon']
+                self.event = tuple(file['event'])
+                self.state = tuple(file['state'])
+                self._n = float(file['_n'])
+                self._pi = file['_pi']
+                self.n = float(file['n'])
+                self.pi = file['pi']
+                self.betti0 = file['betti0']
+                self.betti1 = file['betti1']
 
             def delta(self, x): return np.diff(x, axis=0)
 
@@ -1279,9 +1420,27 @@ class EgocentricSBM(MutableSequence):
 
             def integrate(self, y, x): return np.trapz(y, x, axis=0)
 
-            def del_betti0(self): return self.derivative(self.betti0, self.epsilon)
+            def get_event(self): return '\n'.join([', '.join([str(x[0])+'-'+str(x[1]) for x in e]) for e in self.event])
 
-            def del_betti1(self): return self.derivative(self.betti1, self.epsilon)
+            def get_epsilon(self, norm=False):
+                if norm: return (self.epsilon - self.epsilon.min())/(self.epsilon.max() - self.epsilon.min())
+                else: return self.epsilon.copy()
+
+            def get_betti(self, n=0, norm=False):
+                if n==0: out = self.betti0.copy()
+                elif n==1: out = self.betti1.copy()
+                else: raise ValueError('expected n to be 0 or 1 but got %s instead'%str(n))
+                if norm:
+                    if self.n==float('inf'):
+                        if n==1: out *= 2
+                    else:
+                        if n==0:
+                            out -= 1
+                            out /= self.n-1
+                        elif n==1: out /= (self.n-1)*(self.n-2)/2
+                return out
+
+            def del_betti(self, n=0, norm=False): return self.derivative(self.get_betti(n, norm), self.get_epsilon(norm))
 
             def clip(self, f, top_k=0, bottom_k=0):         
                 if top_k:
@@ -1297,34 +1456,39 @@ class EgocentricSBM(MutableSequence):
                         for i in range(len(min_f)):
                             f[f[:,i]<min_f[i], i] = min_f[i]
                 
-            def plot(self, clip_k=0):
+            def plot(self, norm=False, clip_k=0):
                 import matplotlib.pyplot as plt
-                del_betti0 = self.del_betti0()
-                del_betti1 = self.del_betti1()
+                x = self.get_epsilon(norm)
+                del_betti0 = self.del_betti(0, norm)
+                del_betti1 = self.del_betti(1, norm)
                 if clip_k:
                     self.clip(del_betti0, clip_k, clip_k)
                     self.clip(del_betti1, clip_k, clip_k)
                 plt.figure(dpi=180)
                 plt.subplot(2, 2, 1)
-                plt.plot(self.epsilon, self.betti0, label='betti 0')
+                plt.plot(x, self.get_betti(0, norm), label='betti 0')
                 plt.xlabel('epsilon')
                 plt.title('betti 0')
                 plt.subplot(2, 2, 3)
-                plt.plot(self.epsilon[:-1], del_betti0, label='del betti 0')
+                plt.plot(x[:-1], del_betti0, label='del betti 0')
                 plt.xlabel('epsilon')
                 plt.title('del betti 0')
                 plt.subplot(2, 2, 2)
-                plt.plot(self.epsilon, self.betti1, label='betti 1')
+                plt.plot(x, self.get_betti(1, norm), label='betti 1')
                 plt.xlabel('epsilon')
                 plt.title('betti 1')
                 plt.subplot(2, 2, 4)
-                plt.plot(self.epsilon[:-1], del_betti1, label='del betti 1')
+                plt.plot(x[:-1], del_betti1, label='del betti 1')
                 plt.xlabel('epsilon')
                 plt.title('del betti 1')
                 plt.tight_layout()
                 plt.show()
 
-            def area(self): return (self.integrate(self.betti0, self.epsilon), self.integrate(self.betti1, self.epsilon))
+            def area(self, norm=True):
+                epsilon = self.get_epsilon(norm)
+                betti0 = self.get_betti(0, norm)
+                betti1 = self.get_betti(1, norm)
+                return self.integrate(betti0, epsilon), betti1[0] + self.integrate(betti1, epsilon)
         
 class NetworkData():
 
