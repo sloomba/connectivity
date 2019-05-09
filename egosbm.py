@@ -418,19 +418,6 @@ class EgocentricSBM(MutableSequence):
             if inplace: self.set_params(out.get_params())
             else: return out
         elif not inplace: return self.copy()
-
-    def homophily(self, log=True):
-        if log:
-            def try_log(x):
-                from math import log2
-                try: return log2(x)
-                except: return -float('inf')
-            return [[try_log(v)-try_log(u) for u,v in zip(i,j)] for i,j in zip(self.pi, self.rho)]
-        else: return [[v/u for u,v in zip(i,j)] for i,j in zip(self.pi, self.rho)]
-
-    def ishomophilous(self): return [[u<v for u,v in zip(i,j)] for i,j in zip(self.apx(self.pi), self.apx(self.rho))]
-    def isheterophilous(self): return [[u>v for u,v in zip(i,j)] for i,j in zip(self.apx(self.pi), self.apx(self.rho))]
-    def isambiphilous(self): return [[u==v for u,v in zip(i,j)] for i,j in zip(self.apx(self.pi), self.apx(self.rho))]
     
     def iterable(self, obj):
         if isinstance(obj, str): return False
@@ -441,17 +428,41 @@ class EgocentricSBM(MutableSequence):
     
     def find_sum(self, list_of_vecs, approx=False, collapse=False):
         out = [sum(v) for v in list_of_vecs]
-        if approx: out = self.apx(out)
         if collapse: out = sum(out)/len(out)
+        if approx: out = self.apx(out)
+        return out
+
+    def find_ratio(self, list_of_vals_1, list_of_vals_2, log=False, approx=False, collapse=False):
+        def try_log(x):
+            from math import log2
+            try: return log2(x)
+            except: return -float('inf')
+        if log: out = [try_log(i)-try_log(j) for i, j in zip(list_of_vals_1, list_of_vals_2)]
+        else: out = [i/j for i, j in zip(list_of_vals_1, list_of_vals_2)]
+        if collapse: out = sum(out)/len(out)
+        if approx: out = self.apx(out)
         return out
 
     def find_mean(self, list_of_vecs, pi=None, approx=False, collapse=False):
         if pi is None: pi = self.pi
         elif isinstance(pi, str) and pi=='uni': pi = tuple([(1/b,)*b for b in self.shape])
         out = [sum([i*j for i, j in zip(v, p)]) for v, p in zip(list_of_vecs, pi)]
-        if approx: out = self.apx(out)
         if collapse: out = sum(out)/len(out)
+        if approx: out = self.apx(out)
         return out
+
+    def find_var(self, list_of_vecs, pi=None, approx=False, collapse=False, mean=None):
+        if mean is None: mean = self.find_mean(list_of_vecs, pi)
+        var = self.find_mean([[(i-m)**2 for i in v] for v, m in zip(list_of_vecs, mean)], pi, approx, collapse)
+        return var
+    
+    def ishomophilous(self): return [[u<v for u,v in zip(i,j)] for i,j in zip(self.apx(self.pi), self.apx(self.rho))]
+    
+    def isheterophilous(self): return [[u>v for u,v in zip(i,j)] for i,j in zip(self.apx(self.pi), self.apx(self.rho))]
+    
+    def isambiphilous(self): return [[u==v for u,v in zip(i,j)] for i,j in zip(self.apx(self.pi), self.apx(self.rho))]
+
+    def homophily(self, log=True, approx=False): return [self.find_ratio(j, i, log, approx) for i,j in zip(self.pi, self.rho)]
     
     def sum_pi(self, pi=None, approx=False, collapse=False):
         if pi is None: pi = self.pi
@@ -470,10 +481,20 @@ class EgocentricSBM(MutableSequence):
     def mean_rho(self, rho=None, pi=None, approx=False, collapse=False):
         if rho is None: rho = self.rho
         return self.find_mean(rho, pi, approx, collapse)
+
+    def var_rho(self, rho=None, pi=None, approx=False, collapse=False):
+        if rho is None: rho = self.rho
+        return self.find_var(rho, pi, approx, collapse)
     
     def mean_omega(self, omega=None, pi=None, approx=False, collapse=True):
         if omega is None: omega = self.omega
         return self.find_mean(omega, pi, approx, collapse)
+
+    def var_omega(self, omega=None, pi=None, approx=False, collapse=True):
+        if omega is None: omega = self.omega
+        return self.find_var(omega, pi, approx, collapse)
+
+    def correct_pi(self, pi): return [[i/sum(p) for i in p] for p in pi]
 
     def correct_omega(self, omega, pi=None):
         omega = list(omega)
@@ -484,22 +505,55 @@ class EgocentricSBM(MutableSequence):
             for j in range(len(omega[i])):
                 omega[i][j] *= mo/mean_omega[i]
         return omega
+
+    def correct_rho(self, rho, omega=None):
+        rho = list(rho)
+        if omega is None: omega = self.omega
+        for i in range(len(rho)):
+            rho[i] = list(rho[i])
+            for j in range(len(rho[i])):
+                if omega[i][j]==0.: rho[i][j]=0.
+        return rho
+
+    def correct_params(self, pi, omega, rho):
+        pi = self.correct_pi(pi)
+        omega = self.correct_omega(omega, pi)
+        rho = self.correct_rho(rho, omega)
+        return pi, omega, rho
     
     def mean_homophily(self, rho=None, pi=None, approx=False, collapse=False): return self.mean_rho(rho, pi, approx, collapse)
+
+    def var_homophily(self, rho=None, pi=None, approx=False, collapse=False): return self.var_rho(rho, pi, approx, collapse)
+
+    def relative_mean_homophily(self, rho=None, pi=None, log=True, approx=False, collapse=False): return self.find_ratio(self.mean_homophily(rho, pi), self.dev_pi(pi), log, approx, collapse)
     
     def mean_heterophily(self, rho=None, pi=None, approx=False, collapse=False):
         if collapse: 1 - self.mean_homophily(rho, pi, approx, collapse)
         else: return [1-x for x in self.mean_homophily(rho, pi, approx, collapse)]
+
+    def var_heterophily(self, rho=None, pi=None, approx=False, collapse=False): return self.var_homophily(rho, pi, approx, collapse)
+
+    def relative_mean_heterophily(self, rho=None, pi=None, log=True, approx=False, collapse=False): return self.find_ratio(self.mean_heterophily(rho, pi), [1-x for x in self.dev_pi(pi)], log, approx, collapse)
     
     def mean_homoffinity(self, omega=None, rho=None, pi=None, approx=False, collapse=False):
         if rho is None: rho = self.rho
         if omega is None: omega = self.omega
         return self.find_mean([[w*m for w, m in zip(o, r)] for o, r in zip(omega, rho)], pi, approx, collapse)
+
+    def var_homoffinity(self, omega=None, rho=None, pi=None, approx=False, collapse=False):
+        if rho is None: rho = self.rho
+        if omega is None: omega = self.omega
+        return self.find_var([[w*m for w, m in zip(o, r)] for o, r in zip(omega, rho)], pi, approx, collapse)
     
     def mean_heteroffinity(self, omega=None, rho=None, pi=None, approx=False, collapse=False):
         if rho is None: rho = self.rho
         if omega is None: omega = self.omega
         return self.find_mean([[w*(1-m) for w, m in zip(o, r)] for o, r in zip(omega, rho)], pi, approx, collapse)
+
+    def var_heteroffinity(self, omega=None, rho=None, pi=None, approx=False, collapse=False):
+        if rho is None: rho = self.rho
+        if omega is None: omega = self.omega
+        return self.find_var([[w*(1-m) for w, m in zip(o, r)] for o, r in zip(omega, rho)], pi, approx, collapse)
 
     def check_consistency(self, pi=None, omega=None, rho=None):
         if pi is None: pi = self.pi
@@ -530,6 +584,7 @@ class EgocentricSBM(MutableSequence):
             if not self.iterable(rho[i]): raise TypeError('rho for dimension %s must be an iterable'%i)
             if len(rho[i])!=self.shape[i]: raise ValueError('provide rho for all blocks of dimension %s'%i)
             if not all([0<=j<=1 for j in rho[i]]): raise ValueError('rho must be between 0 and 1 (inclusive); see dimension %s'%i)
+            if not all(rho[i][j]==0 for j in range(self.shape[i]) if omega[i][j]==0): raise ValueError('rho must be 0 for a community with omega 0; see dimension %s'%i)
 
     def get_dims(self):
         from itertools import product
@@ -741,7 +796,8 @@ class EgocentricSBM(MutableSequence):
         dims[key][1].insert(new_idx, name)
         pi[key].insert(new_idx, sum_pi)
         omega[key].insert(new_idx, sum_om/sum_pi)
-        rho[key].insert(new_idx, sum([p*o*r + p*o*(sum_pi-p)*(1-r)/(1-p) for p, o, r in zip(pi_new, omega_new, rho_new)])/sum_om)
+        if sum_om == 0: rho[key].insert(new_idx, 0.)
+        else: rho[key].insert(new_idx, sum([p*o*r + p*o*(sum_pi-p)*(1-r)/(1-p) for p, o, r in zip(pi_new, omega_new, rho_new)])/sum_om)
         if inplace: self.set_params({'shape':shape, 'dims':dims, 'pi':pi, 'rho':rho, 'omega':omega})
         else:
             x = self.copy()
@@ -888,7 +944,8 @@ class EgocentricSBM(MutableSequence):
         dims[key][1].insert(new_idx, name)
         pi[key].insert(new_idx, sum_pi)
         omega[key].insert(new_idx, sum_om/sum_pi)
-        rho[key].insert(new_idx, sum([o*r for o, r in zip(omega_new, rho_new)])*sum_pi/sum_om)
+        if sum_om == 0: rho[key].insert(new_idx, 0.)
+        else: rho[key].insert(new_idx, sum([o*r for o, r in zip(omega_new, rho_new)])*sum_pi/sum_om)
         if inplace: self.set_params({'shape':shape, 'dims':dims, 'pi':pi, 'rho':rho, 'omega':omega})
         else:
             x = self.copy()
@@ -910,6 +967,8 @@ class EgocentricSBM(MutableSequence):
                     rp = p_i*o_i*(r_i+(p-p_i)*(1-r_i)/(1-p_i))
                     rp += p_j*o_j*(r_j+(p-p_j)*(1-r_j)/(1-p_j))
                     rp /= (p_i*o_i+p_j*o_j)
+                    #try: rp /= (p_i*o_i+p_j*o_j)
+                    #except ZeroDivisionError as err: rp = 0
                     f.append((abs(rp-(r_i*p_i+r_j*p_j))*p, i, j))
             return f
         keys = self.get_key(keys)
@@ -939,11 +998,39 @@ class EgocentricSBM(MutableSequence):
     
     class StochasticBlockModel():
         
-        def __init__(self, ego=None, mode='full', directed=True, name=None, filepath=None):
+        def __init__(self, ego=None, pi=None, mode='full', directed=True, counts=False, name=None, filepath=None):
             
             if isinstance(ego, str): ego = EgocentricSBM(filepath=ego)
+            elif isinstance(ego, np.ndarray):
+                shape = ego.shape
+                if len(shape)!=2 or shape[0]!=shape[1]: raise ValueError('expected a square block/count matrix')
+                self.mode = 'global'
+                self.ndim = 1
+                self.shape = (shape[0],)
+                if name is None or isinstance(name, str): name = (name, [str(i) for i in range(shape[0])])
+                elif len(name)==shape[0] and all([isinstance(n, str) for n in name]): name = (None, name)
+                elif len(name)==2 and (name[0] is None or isinstance(name[0], str)) and len(name[1])==shape[0] and all([isinstance(n, str) for n in name[1]]): pass
+                else: raise ValueError('unable to properly parse dimension names')
+                self.name = str(name[0])
+                self.dims = tuple(name[1])
+                self._precision = 8
+                if pi is None: pi = 'uni'
+                pi = self.get_pi(pi).flatten()
+                self.pi = (tuple(pi),)
+                self.params = tuple()
+                if not (ego>=0).all(): raise ValueError('entries of count/block matrix must be non-negative')
+                if counts:
+                    warn('assuming given matrix is a count matrix to be normalised w.r.t. pi', RuntimeWarning)
+                    self.psi = (ego*np.dot((1/pi)[:,np.newaxis], (1/pi)[np.newaxis,:]),)
+                else:
+                    warn('assuming given matrix is a block matrix; if otherwise use counts=True', RuntimeWarning)
+                    self.psi = (ego.copy(),)
+                self.directed = directed and (ego!=ego.transpose()).any()
+                self.meanomega = 1.
+                self.meanomega = self.mean_affinity()
+                return
             elif ego is None:
-                if filepath is None: raise ValueError('either provide "ego" as a valid EgocentricSBM, or as the path to an .ego file containing a valid EgocentricSBM, or provide "filepath" to an .npz file containing a valid StochasticBlockModel')
+                if filepath is None: raise ValueError('either provide "ego" as a valid EgocentricSBM, or as the path to an .ego file containing a valid EgocentricSBM, or as a square np.ndarray representing the block matrix, or provide "filepath" to an .npz file containing a valid StochasticBlockModel')
                 self.load(filepath)
                 if name is not None: self.name = str(name)
                 return
@@ -954,9 +1041,12 @@ class EgocentricSBM(MutableSequence):
             self.ndim = ego.ndim
             self.shape = ego.shape
             self.dims = ego.get_dims()
-            self.pi = ego.pi
+            self._precision = max(8, ego.precision)
+            if pi is None: self.pi = ego.pi
+            else:
+                self.check_pi(pi)
+                self.pi = tuple(pi)
             self.meanomega = ego.mean_omega()
-            self._precision = ego.precision
             
             if mode=='full':
                 self.params = tuple([tuple([(o, r/p, (1-r)/(1-p)) if p!=1 else (o, 1., 0.) for r, o, p in zip(ego.rho[i], ego.omega[i], ego.pi[i])]) for i in range(ego.ndim)])
@@ -1018,7 +1108,7 @@ class EgocentricSBM(MutableSequence):
             self.shape = tuple(file['shape'])
             self.dims = tuple(file['dims'])
             self.params = tuple(file['params'])
-            self.pi = tuple(file['pi'])
+            self.pi = tuple([tuple(p) for p in file['pi']])
             self.psi = tuple(file['psi'])
             self.meanomega = float(file['meanomega'])
             self.precision = int(file['precision'])
@@ -1033,43 +1123,46 @@ class EgocentricSBM(MutableSequence):
 
         def copy(self): return self.__copy__()
             
-        def kron(self, list_of_mats):
+        def kron(self, list_of_mats, divisor=1.):
                 a = np.array(list_of_mats[0])
                 for i in range(1, len(list_of_mats)):
-                    a = np.kron(a, np.array(list_of_mats[i]))
+                    a = np.kron(a, np.array(list_of_mats[i])/divisor)
                 return a
             
         def get_shape(self): return int(self.kron(self.shape))
+
+        def check_pi(self, pi):
+            if len(pi)==self.ndim:
+                for i in self.ndim:
+                    if len(pi[i])!=self.shape[i]: raise ValueError('provide pi for all blocks and in proper dimension order')
+                pi = self.kron(pi)
+            if len(pi)!=self.get_shape(): raise ValueError('provide full or factorised pi')
+            if not all([0<=p<=1 for p in pi]): raise ValueError('pi must be between 0 and 1 (inclusive)')
+            if self.apx(sum(pi))!=1: raise ValueError('pi must sum up to 1')
+            return pi
         
         def get_pi(self, pi=None, approx=False):
             if pi is None: return self.kron(self.pi)
             if isinstance(pi, str):
                 if pi=='uni': return (1/self.get_shape())*np.ones([self.get_shape()])
                 else: raise ValueError('unknown value of pi "%s"; did you mean "uni" for uniform distribution?'%pi)
-            try:
+            try: #pi as matrix
                 pi_shape = pi.shape
                 if (len(pi_shape)==1 or len(pi_shape)==2) and pi_shape[0]==self.get_shape():
                     if (pi>=0).all() and (pi<=1).all():
                         if not (self.apx(pi.sum(0))==1).all(): raise ValueError('pi must sum up to 1')
                     else: raise ValueError('pi must be between 0 and 1 (inclusive)')
                 else: raise ValueError('expected pi for exactly %d blocks'%self.get_shape())
-            except AttributeError as err:
-                if len(pi)==self.ndim:
-                    for i in self.ndim:
-                        if len(pi[i])!=self.shape[i]: raise ValueError('provide pi for all blocks and in proper dimension order')
-                    pi = self.kron(pi)
-                if len(pi)!=self.get_shape(): raise ValueError('provide full or factorised pi')
-                if not all([0<=p<=1 for p in pi]): raise ValueError('pi must be between 0 and 1 (inclusive)')
-                if self.apx(sum(pi))!=1: raise ValueError('pi must sum up to 1')
+            except AttributeError as err: pi = self.check_pi(pi)                
             except Exception as err: raise err
             if approx: return self.apx(pi)
             else: return np.array(pi)
             
         def get_psi(self, directed=None, log_ratio=False, approx=False, sort=False):
-            multiplier = 1/(self.meanomega**(self.ndim-1))
-            if self.mode=='ppcollapsed': out = multiplier*self.kron(self.psi)
-            elif self.mode=='pp': out = multiplier*np.matmul(self.kron([x[0] for x in self.psi]), self.kron([x[1] for x in self.psi]))
-            elif self.mode=='full': out =  multiplier*np.matmul(self.kron([x[0] for x in self.psi]), self.kron([x[1] for x in self.psi]))
+            if self.mode=='ppcollapsed': out = self.kron(self.psi, self.meanomega)
+            elif self.mode=='pp': out = np.matmul(self.kron([x[0] for x in self.psi], self.meanomega), self.kron([x[1] for x in self.psi]))
+            elif self.mode=='full': out =  np.matmul(self.kron([x[0] for x in self.psi], self.meanomega), self.kron([x[1] for x in self.psi]))
+            elif self.mode=='global': out = self.psi[0]
             if directed is None: directed = self.directed
             if not directed:
                 if self.directed: warn('symmetrising the stochastic block matrix', RuntimeWarning)
@@ -1078,8 +1171,174 @@ class EgocentricSBM(MutableSequence):
                 idx = np.argsort(np.diag(out), kind='mergesort')[::-1] #sort by decreasing homophily
                 out = out[idx,:][:,idx]
             if log_ratio: out = np.log2(out) - np.hstack([np.log2(np.diag(out))[:,np.newaxis]]*self.get_shape())
-            if approx: return self.apx(out)
-            else: return out
+            if approx: out = self.apx(out)
+            return out
+
+        def get_omega(self, directed=None, approx=False): return self.find_mean(self.get_psi(directed, approx=approx), pi=None, approx=approx)
+
+        def get_rho(self, directed=None, approx=False):
+            out = np.diag(self.get_psi(directed))*self.get_pi()/self.get_omega(directed)
+            if approx: out = self.apx(out)
+            return out
+
+        def get_laplacian(self, mode='out', pi=None, norm=False, sym=False):
+            if mode=='out': psi = self.get_psi()
+            elif mode=='in': psi = self.get_psi().transpose()
+            elif mode=='sym': psi = self.get_psi(directed=False)
+            else: raise ValueError('mode "%s" not recognized; use "out"/"in"/"sym"'%mode)
+            if pi!=False:
+                pi = self.get_pi(pi)
+                psi *= np.dot(pi[:,np.newaxis], pi[np.newaxis,:])
+            sum_psi = psi.sum(1)
+            lap = np.diag(sum_psi) - psi #ordinary laplacian
+            if sym and norm: lap = np.matmul(np.matmul(np.diag(np.sqrt(1/sum_psi)), lap), np.diag(np.sqrt(1/sum_psi))) #symmetric normalized
+            elif not sym and norm: lap = np.matmul(np.diag(1/sum_psi), lap) #random walk normalized
+            elif sym and not norm: raise ValueError('invalid combination of sym (%s) and norm (%s); did you mean directed=False?'%(sym, norm))
+            return lap
+
+        def get_key(self, key=None):
+            if isinstance(key, int):
+                shape = self.get_shape()
+                if key<0 and key>=-shape: key += shape
+                if key>=0 and key<shape: pass
+                else: raise IndexError('sbm index out of range; must be between 0, %d (inclusive)'%(shape-1))
+            elif isinstance(key, str):
+                found = False
+                for i in range(len(self.dims)):
+                    if self.dims[i]==key:
+                        key = i
+                        found = True
+                        break
+                if not found: raise KeyError('sbm key "%s" not found; must be dimension name'%key)
+            else: raise KeyError('sbm key "%s" not found; must be dimension name'%key)
+            return key
+
+        def cluster(self, mode='sym', pi=False, norm=True, k=None, seed=0, plot=True):
+            #see https://www.cs.cmu.edu/~aarti/Class/10701/readings/Luxburg06_TR.pdf
+            if k is None:
+                from math import log2, ceil
+                k = ceil(log2(len(self)))
+            lap = self.get_laplacian(mode, pi, norm)
+            eigval, eigvec = np.linalg.eigh(lap)
+            k = max(min(len(eigvec), k), 1)
+            if plot:
+                try:
+                    import matplotlib.pyplot as plt
+                    plt.subplot(1, 2, 1)
+                    plt.scatter(range(1, k+1), eigval[:k], label='eig')
+                    plt.scatter(range(1, k), np.diff(eigval[:k]), label='del')
+                    plt.xlabel('k')
+                    plt.ylabel('eigval')
+                    plt.subplot(1, 2, 2)
+                    plt.scatter(range(1, len(eigval)+1), eigval, label='eig')
+                    plt.scatter(range(1, len(eigval)), np.diff(eigval), label='del')
+                    plt.xlabel('k')
+                    plt.ylabel('eigval')
+                    plt.legend()
+                    plt.show()
+                except: pass
+            eigvec = eigvec[:,:k]
+            proj = np.matmul(lap, eigvec)
+            from sklearn.cluster import KMeans
+            model = KMeans(n_clusters=k, random_state=seed).fit(proj)
+            return tuple(model.labels_)
+
+        def merge(self, keys=None):
+            if self.mode!='global': raise RuntimeError('cannot merge blocks for a "%s" model'%self.mode)
+            if keys is None: idx = list(np.where(np.diag(self.get_psi(approx=True))==0)[0]) #merge only perfectly heterophilous communities
+            else: idx = sorted([self.get_key(key) for key in set(keys)])
+            if len(idx)>1:
+                idx_new = idx[0]
+                pi = self.get_pi()
+                psi = self.get_psi()
+                psi *= np.dot(pi[:,np.newaxis], pi[np.newaxis,:])
+                counts_out = psi[:,idx].sum(1)
+                counts_out = np.insert(np.delete(counts_out, idx), idx_new, counts_out[idx].sum())
+                counts_in = np.delete(psi[idx,:].sum(0), idx)
+                psi = np.insert(np.insert(np.delete(np.delete(psi, idx, 1), idx, 0), idx_new, counts_in, 0), idx_new, counts_out, 1)
+                pi = np.insert(np.delete(pi, idx), idx_new, pi[idx].sum())
+                psi *= np.dot((1/pi)[:,np.newaxis], (1/pi)[np.newaxis,:])
+                self.pi = (tuple(pi),)
+                self.psi = (psi,)
+                dims = list(self.dims)
+                dims_new = []
+                for i in range(len(idx)): dims_new.append(dims.pop(idx[i]-i))
+                dims.insert(idx_new, ' | '.join(dims_new))
+                self.dims = tuple(dims)
+                self.shape = (self.shape[0]-len(idx)+1,)
+                self.directed = self.directed and (psi!=psi.transpose()).any()
+                #self.meanomega = self.mean_affinity() #ideally this should not change!
+
+        def compress(self, mode='sym', pi=False, norm=True, m=None, inplace=True):
+            clusters = self.cluster(mode, pi, norm, m, plot=False)
+            to_merge = [[] for i in range(max(clusters)+1)]
+            for i in range(len(clusters)): to_merge[clusters[i]].append(self.dims[i])
+            if inplace:
+                for cluster in to_merge: self.merge(cluster)
+            else:
+                out = self.copy()
+                for cluster in to_merge: out.merge(cluster)
+                return out
+
+        def project(self, directed=False, m=None, plot=False):
+            if m is None:
+                from math import log2, ceil
+                m = ceil(log2(len(self)))
+            a = self.get_psi(directed=directed)
+            eigval, eigvec = np.linalg.eig(a)
+            idx = np.argsort(np.abs(eigval), kind='mergesort')
+            eigval = eigval[idx][::-1]
+            eigvec = eigvec[:, idx][:, ::-1]
+            proj = np.dot(a, eigvec)
+            proj /= np.linalg.norm(a, 2, 1)[:,np.newaxis]
+            com_pos = [[self.dims[j] for j in range(proj.shape[0]) if proj[j,i]>=0] for i in range(1, m+1)]
+            com_neg = [[self.dims[j] for j in range(proj.shape[0]) if proj[j,i]<0] for i in range(1, m+1)]
+            psi = []
+            pi = []
+            om = []
+            for i in range(m):
+                tmp = self.copy()
+                tmp.merge(com_pos[i])
+                tmp.merge(com_neg[i])
+                psi.append(tmp.get_psi(directed=directed))
+                pi.append(tmp.get_pi())
+                om.append(tmp.get_omega())
+            omega_full = self.kron(om, self.meanomega)
+            pi_full = self.kron(pi)
+            psi_full = self.kron(psi, self.meanomega)
+            if plot:
+                import matplotlib.pyplot as plt
+                eigval_full = np.linalg.eigvals(psi_full)
+                eigval_logabs = np.sort(np.log2(np.abs(eigval)), kind='mergesort')
+                eigval_full_logabs = np.sort(np.log2(np.abs(eigval_full)), kind='mergesort')
+                eigval_del = np.diff(eigval_logabs)
+                h1 = plt.scatter(eigval_logabs[1:], eigval_del, color='black', label='original')
+                for i in eigval_full_logabs[-(m+1):]: h2 = plt.gca().axvline(i, ls='--', color='red', label='inferred (top m+1)')
+                plt.xlabel('log(abs(eig))')
+                plt.ylabel('del log(abs(eig))')
+                plt.legend(handles=[h1, h2])
+                plt.title('inferring latent sbm with %d dims'%m)
+                plt.show()
+                try:                    
+                    import seaborn as sns
+                    omo = np.log2(self.get_omega())
+                    omo = omo[~np.isinf(omo)]
+                    omi = np.log2(omega_full)
+                    omi = omi[~np.isinf(omi)]
+                    sns.distplot(omo, label='original')
+                    sns.distplot(omi, label='inferred')
+                    plt.gca().axvline(np.log2(self.meanomega), ls='--', color='black', label='original mean omega')
+                    plt.title('distribution of log(omega)')
+                    plt.legend()
+                    plt.show()
+                    sns.distplot(eigval_logabs, label='original')
+                    sns.distplot(eigval_full_logabs, label='inferred')
+                    plt.legend()
+                    plt.title('distribution of log(abs(eig))')
+                    plt.show()
+                except ImportError as err: pass
+                except Exception as err: raise err
+            return type(self)(psi_full, pi_full, name=self.name+'.proj')
 
         def find_mean(self, value, pi=None, approx=False): return np.dot(value, self.get_pi(pi, approx))
 
@@ -1161,13 +1420,9 @@ class EgocentricSBM(MutableSequence):
         
         def eigvals_pipsi_theoretical(self):
             pi = 1/self.get_shape()
-            if self.mode=='full': raise RuntimeError('cannot compute theoretical eigenvalues for a "full" model')
-            elif self.mode=='pp':
-                factor = pi*self.meanomega
-                eigs = sorted(tuple(factor*self.kron([(h[0]+h[1]*(s-1),)+(h[0]-h[1],)*(s-1) for (h, s) in zip(self.params[1], self.shape)])), reverse=True)
-            elif self.mode=='ppcollapsed':
-                factor = pi/(self.meanomega**(self.ndim-1))
-                eigs = sorted(tuple(factor*self.kron([(h[0]+h[1]*(s-1),)+(h[0]-h[1],)*(s-1) for (h, s) in zip(self.params, self.shape)])), reverse=True)
+            if self.mode=='full' or self.mode=='global': raise RuntimeError('cannot compute theoretical eigenvalues for a "%s" model'%self.mode)
+            elif self.mode=='pp': eigs = sorted(tuple(pi*self.meanomega*self.kron([(h[0]+h[1]*(s-1),)+(h[0]-h[1],)*(s-1) for (h, s) in zip(self.params[1], self.shape)])), reverse=True)
+            elif self.mode=='ppcollapsed': eigs = sorted(tuple(pi*self.meanomega*self.kron([(h[0]+h[1]*(s-1),)+(h[0]-h[1],)*(s-1) for (h, s) in zip(self.params, self.shape)], self.meanomega)), reverse=True)
             return eigs
         
         def homoffinity_out(self, pi=None, directed=None, log_ratio=False, approx=False): return np.diag(self.get_psi(directed, log_ratio, approx))*self.get_pi(pi, approx)
@@ -1316,6 +1571,7 @@ class EgocentricSBM(MutableSequence):
                 if name is None: name = sbm.name + '.bar'
                 self.name = str(name)
                 self.k = k
+                self.dims = sbm.dims
                 self.epsilon = psi
                 self.event = tuple(edge_list)
                 self.state = tuple(conn_list)
@@ -1389,7 +1645,7 @@ class EgocentricSBM(MutableSequence):
 
             def reset(self): self.set(self._pi, self._n)
 
-            def get_params(self): return {'name':self.name, 'k':self.k, 'epsilon':self.epsilon, 'event':self.event, 'state':self.state, '_n':self._n, '_pi':self._pi, 'n':self.n, 'pi':self.pi, 'betti0':self.betti0, 'betti1':self.betti1}
+            def get_params(self): return {'name':self.name, 'k':self.k, 'dims':self.dims, 'epsilon':self.epsilon, 'event':self.event, 'state':self.state, '_n':self._n, '_pi':self._pi, 'n':self.n, 'pi':self.pi, 'betti0':self.betti0, 'betti1':self.betti1}
 
             def save(self, filepath=None):
                 if filepath is None: filepath = self.name
@@ -1399,6 +1655,7 @@ class EgocentricSBM(MutableSequence):
                 file = np.load(filepath)
                 self.name = str(file['name'])
                 self.k = int(file['k'])
+                self.dims = tuple(file['dims'])
                 self.epsilon = file['epsilon']
                 self.event = tuple(file['event'])
                 self.state = tuple(file['state'])
@@ -1420,7 +1677,12 @@ class EgocentricSBM(MutableSequence):
 
             def integrate(self, y, x): return np.trapz(y, x, axis=0)
 
-            def get_event(self): return '\n'.join([', '.join([str(x[0])+'-'+str(x[1]) for x in e]) for e in self.event])
+            def get_event(self): return '\n'.join([', '.join([self.dims[x[0]]+' <---> '+self.dims[x[1]] for x in e]) for e in self.event])
+
+            def get_epoch(self, norm=False):
+                l = len(self)
+                if norm: return np.arange(l)/(l-1)
+                else: return np.arange(l)
 
             def get_epsilon(self, norm=False):
                 if norm: return (self.epsilon - self.epsilon.min())/(self.epsilon.max() - self.epsilon.min())
@@ -1459,36 +1721,48 @@ class EgocentricSBM(MutableSequence):
             def plot(self, norm=False, clip_k=0):
                 import matplotlib.pyplot as plt
                 x = self.get_epsilon(norm)
+                epoch = self.get_epoch(norm)
+                betti0 = self.get_betti(0, norm)
+                betti1 = self.get_betti(1, norm)
                 del_betti0 = self.del_betti(0, norm)
                 del_betti1 = self.del_betti(1, norm)
                 if clip_k:
                     self.clip(del_betti0, clip_k, clip_k)
                     self.clip(del_betti1, clip_k, clip_k)
                 plt.figure(dpi=180)
-                plt.subplot(2, 2, 1)
-                plt.plot(x, self.get_betti(0, norm), label='betti 0')
+                plt.subplot(2, 3, 1)
+                plt.plot(x, betti0)
                 plt.xlabel('epsilon')
-                plt.title('betti 0')
-                plt.subplot(2, 2, 3)
-                plt.plot(x[:-1], del_betti0, label='del betti 0')
+                plt.ylabel('betti0')
+                plt.subplot(2, 3, 2)
+                plt.plot(x[:-1], del_betti0)
                 plt.xlabel('epsilon')
-                plt.title('del betti 0')
-                plt.subplot(2, 2, 2)
-                plt.plot(x, self.get_betti(1, norm), label='betti 1')
+                plt.ylabel('del betti0 / del epsilon')
+                plt.subplot(2, 3, 3)
+                plt.plot(epoch, betti0)
+                plt.xlabel('epoch')
+                plt.ylabel('betti0')
+                plt.subplot(2, 3, 4)
+                plt.plot(x, betti1)
                 plt.xlabel('epsilon')
-                plt.title('betti 1')
-                plt.subplot(2, 2, 4)
-                plt.plot(x[:-1], del_betti1, label='del betti 1')
+                plt.ylabel('betti1')
+                plt.subplot(2, 3, 5)
+                plt.plot(x[:-1], del_betti1)
                 plt.xlabel('epsilon')
-                plt.title('del betti 1')
+                plt.ylabel('del betti1 / del epsilon')
+                plt.subplot(2, 3, 6)
+                plt.plot(epoch, betti1)
+                plt.xlabel('epoch')
+                plt.ylabel('betti1')
                 plt.tight_layout()
                 plt.show()
 
-            def area(self, norm=True):
-                epsilon = self.get_epsilon(norm)
+            def area(self, epsilon=True, norm=True):
+                if epsilon: x = self.get_epsilon(norm)
+                else: x = self.get_epoch(norm)
                 betti0 = self.get_betti(0, norm)
                 betti1 = self.get_betti(1, norm)
-                return self.integrate(betti0, epsilon), betti1[0] + self.integrate(betti1, epsilon)
+                return self.integrate(betti0, x), betti1[0] + self.integrate(betti1, x)
         
 class NetworkData():
 
