@@ -1158,7 +1158,7 @@ class EgocentricSBM(MutableSequence):
             if approx: return self.apx(pi)
             else: return np.array(pi)
             
-        def get_psi(self, directed=None, log_ratio=False, approx=False, sort=False):
+        def get_psi(self, directed=None, log=False, ratio=False, approx=False, sort=False):
             if self.mode=='ppcollapsed': out = self.kron(self.psi, self.meanomega)
             elif self.mode=='pp': out = np.matmul(self.kron([x[0] for x in self.psi], self.meanomega), self.kron([x[1] for x in self.psi]))
             elif self.mode=='full': out =  np.matmul(self.kron([x[0] for x in self.psi], self.meanomega), self.kron([x[1] for x in self.psi]))
@@ -1170,7 +1170,8 @@ class EgocentricSBM(MutableSequence):
             if sort:
                 idx = np.argsort(np.diag(out), kind='mergesort')[::-1] #sort by decreasing homophily
                 out = out[idx,:][:,idx]
-            if log_ratio: out = np.log2(out) - np.hstack([np.log2(np.diag(out))[:,np.newaxis]]*self.get_shape())
+            if ratio: out /= np.diag(out)[:,np.newaxis]
+            if log: out = np.log2(out)
             if approx: out = self.apx(out)
             return out
 
@@ -1280,7 +1281,7 @@ class EgocentricSBM(MutableSequence):
                 for cluster in to_merge: out.merge(cluster)
                 return out
 
-        def project(self, directed=False, m=None, plot=False):
+        def project(self, directed=False, m=None, scale=False, plot=False):
             if m is None:
                 from math import log2, ceil
                 m = ceil(log2(len(self)))
@@ -1306,6 +1307,10 @@ class EgocentricSBM(MutableSequence):
             omega_full = self.kron(om, self.meanomega)
             pi_full = self.kron(pi)
             psi_full = self.kron(psi, self.meanomega)
+            if scale:
+                factor = max(np.abs(eigval))/max(np.abs(np.linalg.eigvals(psi_full)))
+                omega_full *= factor
+                psi_full *= factor
             if plot:
                 import matplotlib.pyplot as plt
                 eigval_full = np.linalg.eigvals(psi_full)
@@ -1338,6 +1343,76 @@ class EgocentricSBM(MutableSequence):
                     plt.show()
                 except ImportError as err: pass
                 except Exception as err: raise err
+            return type(self)(psi_full, pi_full, name=self.name+'.proj')
+
+        def eigproj(self, directed=False, m=None, plot=False):
+            if m is None:
+                from math import log2, ceil
+                m = ceil(log2(len(self)))
+            a = self.get_psi(directed=directed)
+            eigval, eigvec = np.linalg.eig(a)
+            eigval_logabs = np.log2(np.abs(eigval))
+            idx = np.argsort(eigval_logabs, kind='mergesort')
+            eigval_sorted = eigval[idx]
+            eigval_logabs = eigval_logabs[idx]
+            eigvec = eigvec[:, idx][:, ::-1]
+            proj = np.dot(a, eigvec)
+            proj /= np.linalg.norm(a, 2, 1)[:,np.newaxis]
+            com_pos = [[self.dims[j] for j in range(proj.shape[0]) if proj[j,i]>=0] for i in range(1, m+1)]
+            com_neg = [[self.dims[j] for j in range(proj.shape[0]) if proj[j,i]<0] for i in range(1, m+1)]
+            pi = []
+            for i in range(m):
+                tmp = self.copy()
+                tmp.merge(com_pos[i])
+                tmp.merge(com_neg[i])
+                pi.append(tmp.get_pi())
+            pi_full = self.kron(pi)
+            a = np.ones((m, m)) - np.eye(m)
+            b = eigval_logabs[-(m+1):-1]
+            a_inv = np.linalg.inv(a)
+            a_inv_b = np.dot(a_inv, b)
+            k = (np.dot(np.ones(m), a_inv_b) - eigval_logabs[-1])/np.dot(np.ones(m), np.dot(a_inv, np.ones(m)))
+            lambda_pos = np.dot(a_inv, b-k)
+            lambda_pos = 2**lambda_pos
+            lambda_neg = 2**k*np.ones(m)
+            if eigval_sorted[-1]<0: raise RuntimeError('largest eigenvalue must not be negative')
+            for i in range(m):
+                if eigval_sorted[-(i+2)]<0: lambda_neg[-(i+1)] = -lambda_neg[-(i+1)]
+            p = (lambda_pos+lambda_neg)/2
+            q = (lambda_pos-lambda_neg)/2
+            psi_full = self.kron([np.array([[i,j],[j,i]]) for (i, j) in zip(p, q)])
+            if plot:
+                import matplotlib.pyplot as plt
+                eigs_psi = np.linalg.eigvalsh(psi_full)
+                eigs_psi_logabs = np.log2(np.abs(eigs_psi))
+                idx = np.argsort(eigs_psi_logabs, kind='mergesort')
+                eigs_psi_sorted = eigs_psi[idx]
+                eigs_psi_logabs = eigs_psi_logabs[idx]
+                eigs_del = np.diff(eigval_sorted)
+                h1 = plt.scatter(eigval_sorted[1:], eigs_del, color='black', label='original')
+                for i in eigs_psi_sorted[-(m+1):]: h2 = plt.gca().axvline(i, ls='--', color='red', label='inferred (top m+1)')
+                plt.xlabel('eig')
+                plt.ylabel('del eig')
+                plt.legend(handles=[h1, h2])
+                plt.title('inferring latent sbm with %d dims'%m)
+                plt.show()
+                eigs_del = np.diff(eigval_logabs)
+                h1 = plt.scatter(eigval_logabs[1:], eigs_del, color='black', label='original')
+                for i in eigs_psi_logabs[-(m+1):]: h2 = plt.gca().axvline(i, ls='--', color='red', label='inferred (top m+1)')
+                plt.xlabel('log(abs(eig))')
+                plt.ylabel('del log(abs(eig))')
+                plt.legend(handles=[h1, h2])
+                plt.title('inferring latent sbm with %d dims'%m)
+                plt.show()
+                try:
+                    import seaborn as sns
+                    plt.figure()
+                    sns.distplot(eigs_logabs, label='original')
+                    sns.distplot(eigs_psi_logabs, label='inferred')
+                    plt.legend()
+                    plt.title('distribution of log(abs(eig))')
+                    plt.show()
+                except: pass
             return type(self)(psi_full, pi_full, name=self.name+'.proj')
 
         def find_mean(self, value, pi=None, approx=False): return np.dot(value, self.get_pi(pi, approx))
@@ -1425,31 +1500,31 @@ class EgocentricSBM(MutableSequence):
             elif self.mode=='ppcollapsed': eigs = sorted(tuple(pi*self.meanomega*self.kron([(h[0]+h[1]*(s-1),)+(h[0]-h[1],)*(s-1) for (h, s) in zip(self.params, self.shape)], self.meanomega)), reverse=True)
             return eigs
         
-        def homoffinity_out(self, pi=None, directed=None, log_ratio=False, approx=False): return np.diag(self.get_psi(directed, log_ratio, approx))*self.get_pi(pi, approx)
-        def homoffinity_in(self, pi=None, directed=None, log_ratio=False, approx=False): return self.homoffinity_out(pi, directed, log_ratio, approx)
-        def homoffinity(self, pi=None, directed=None, log_ratio=False, approx=False): return self.homoffinity_out(pi, directed, log_ratio, approx)
+        def homoffinity_out(self, pi=None, directed=None, log=False, ratio=False, approx=False): return np.diag(self.get_psi(directed, log, ratio, approx))*self.get_pi(pi, approx)
+        def homoffinity_in(self, pi=None, directed=None, log=False, ratio=False, approx=False): return self.homoffinity_out(pi, directed, log, ratio, approx)
+        def homoffinity(self, pi=None, directed=None, log=False, ratio=False, approx=False): return self.homoffinity_out(pi, directed, log, ratio, approx)
             
-        def heteroffinity_out(self, pi=None, directed=None, log_ratio=False, approx=False): return self.affinity_out(pi, directed, log_ratio, approx)-self.homoffinity_out(pi, directed, log_ratio, approx)
-        def heteroffinity_in(self, pi=None, directed=None, log_ratio=False, approx=False): return self.affinity_in(pi, directed, log_ratio, approx)-self.homoffinity_in(pi, directed, log_ratio, approx)
-        def heteroffinity(self, pi=None, directed=None, log_ratio=False, approx=False): return self.affinity(pi, directed, log_ratio, approx)-self.homoffinity(pi, directed, log_ratio, approx)
+        def heteroffinity_out(self, pi=None, directed=None, log=False, ratio=False, approx=False): return self.affinity_out(pi, directed, log, ratio, approx)-self.homoffinity_out(pi, directed, log, ratio, approx)
+        def heteroffinity_in(self, pi=None, directed=None, log=False, ratio=False, approx=False): return self.affinity_in(pi, directed, log, ratio, approx)-self.homoffinity_in(pi, directed, log, ratio, approx)
+        def heteroffinity(self, pi=None, directed=None, log=False, ratio=False, approx=False): return self.affinity(pi, directed, log, ratio, approx)-self.homoffinity(pi, directed, log, ratio, approx)
         
-        def affinity_out(self, pi=None, directed=None, log_ratio=False, approx=False): return self.find_mean(self.get_psi(directed, log_ratio, approx), pi, approx)
-        def affinity_in(self, pi=None, directed=None, log_ratio=False, approx=False): return self.find_mean(self.get_psi(directed, log_ratio, approx).transpose(), pi, approx)
-        def affinity(self, pi=None, directed=None, log_ratio=False, approx=False):
+        def affinity_out(self, pi=None, directed=None, log=False, ratio=False, approx=False): return self.find_mean(self.get_psi(directed, log, ratio, approx), pi, approx)
+        def affinity_in(self, pi=None, directed=None, log=False, ratio=False, approx=False): return self.find_mean(self.get_psi(directed, log, ratio, approx).transpose(), pi, approx)
+        def affinity(self, pi=None, directed=None, log=False, ratio=False, approx=False):
             if self.directed and (directed or directed is None): raise RuntimeError('affinity is ambiguous for directed SBMs; use affinity_in() or affinity_out()')
-            else: return self.affinity_out(pi, directed, log_ratio, approx)
+            else: return self.affinity_out(pi, directed, log, ratio, approx)
         
-        def mean_homoffinity_out(self, pi=None, directed=None, log_ratio=False, approx=False): return self.find_mean(self.homoffinity_out(pi, directed, log_ratio, approx), pi, approx)
-        def mean_homoffinity_in(self, pi=None, directed=None, log_ratio=False, approx=False): return self.find_mean(self.homoffinity_in(pi, directed, log_ratio, approx), pi, approx)
-        def mean_homoffinity(self, pi=None, directed=None, log_ratio=False, approx=False): return self.find_mean(self.homoffinity(pi, directed, log_ratio, approx), pi, approx)
+        def mean_homoffinity_out(self, pi=None, directed=None, log=False, ratio=False, approx=False): return self.find_mean(self.homoffinity_out(pi, directed, log, ratio, approx), pi, approx)
+        def mean_homoffinity_in(self, pi=None, directed=None, log=False, ratio=False, approx=False): return self.find_mean(self.homoffinity_in(pi, directed, log, ratio, approx), pi, approx)
+        def mean_homoffinity(self, pi=None, directed=None, log=False, ratio=False, approx=False): return self.find_mean(self.homoffinity(pi, directed, log, ratio, approx), pi, approx)
         
-        def mean_heteroffinity_out(self, pi=None, directed=None, log_ratio=False, approx=False): return self.find_mean(self.heteroffinity_out(pi, directed, log_ratio, approx), pi, approx)
-        def mean_heteroffinity_in(self, pi=None, directed=None, log_ratio=False, approx=False): return self.find_mean(self.heteroffinity_in(pi, directed, log_ratio, approx), pi, approx)
-        def mean_heteroffinity(self, pi=None, directed=None, log_ratio=False, approx=False): return self.find_mean(self.heteroffinity_out(pi, directed, log_ratio, approx), pi, approx)
+        def mean_heteroffinity_out(self, pi=None, directed=None, log=False, ratio=False, approx=False): return self.find_mean(self.heteroffinity_out(pi, directed, log, ratio, approx), pi, approx)
+        def mean_heteroffinity_in(self, pi=None, directed=None, log=False, ratio=False, approx=False): return self.find_mean(self.heteroffinity_in(pi, directed, log, ratio, approx), pi, approx)
+        def mean_heteroffinity(self, pi=None, directed=None, log=False, ratio=False, approx=False): return self.find_mean(self.heteroffinity_out(pi, directed, log, ratio, approx), pi, approx)
         
-        def mean_affinity_out(self, pi=None, directed=None, log_ratio=False, approx=False): return self.find_mean(self.affinity_out(pi, directed, log_ratio, approx), pi, approx)
-        def mean_affinity_in(self, pi=None, directed=None, log_ratio=False, approx=False): return self.find_mean(self.affinity_in(pi, directed, log_ratio, approx), pi, approx)
-        def mean_affinity(self, pi=None, directed=None, log_ratio=False, approx=False): return self.find_mean(self.affinity_out(pi, directed, log_ratio, approx), pi, approx)
+        def mean_affinity_out(self, pi=None, directed=None, log=False, ratio=False, approx=False): return self.find_mean(self.affinity_out(pi, directed, log, ratio, approx), pi, approx)
+        def mean_affinity_in(self, pi=None, directed=None, log=False, ratio=False, approx=False): return self.find_mean(self.affinity_in(pi, directed, log, ratio, approx), pi, approx)
+        def mean_affinity(self, pi=None, directed=None, log=False, ratio=False, approx=False): return self.find_mean(self.affinity_out(pi, directed, log, ratio, approx), pi, approx)
         
         def floyd_warshall(self, pw_dist_matrix, paths=True):
             if (pw_dist_matrix<0).any(): warn('negative pairwise distances can lead to negative path lengths')
@@ -1507,15 +1582,16 @@ class EgocentricSBM(MutableSequence):
             if not positivity: metric = metric + np.array([[temp*(len(paths[i][j])-1) for j in range(len(paths[i]))] for i in range(len(paths))])
             return metric
         
-        def sas_individual_pw(self, log_ratio=True, metric_type=None, approx=False): return self.dis2met(-self.get_psi(log_ratio=log_ratio, approx=approx), metric_type)
-        def sas_individual_out(self, log_ratio=True, metric_type=None, pi=None, approx=False): return self.find_mean(self.sas_individual_pw(log_ratio, metric_type, approx), pi, approx)
-        def sas_individual_in(self, log_ratio=True, metric_type=None, pi=None, approx=False): return self.find_mean(self.sas_individual_pw(log_ratio, metric_type, approx).transpose(), pi, approx)
-        def sas_individual(self, log_ratio=True, metric_type=None, pi=None, approx=False):
+        def sas_individual_pw(self, log=True, ratio=True, metric_type=None, approx=False): return self.dis2met(-self.get_psi(log=log, ratio=ratio, approx=approx), metric_type)
+        def sas_individual_out(self, log=True, ratio=True, metric_type=None, pi=None, approx=False): return self.find_mean(self.sas_individual_pw(log, ratio, metric_type, approx), pi, approx)
+        def sas_individual_in(self, log=True, ratio=True, metric_type=None, pi=None, approx=False): return self.find_mean(self.sas_individual_pw(log, ratio, metric_type, approx).transpose(), pi, approx)
+        def sas_individual(self, log=True, ratio=True, metric_type=None, pi=None, approx=False):
             if self.directed: raise RuntimeError('individual SAS is ambiguous for directed SBMs; use sas_individual_out() or sas_individual_in()')
-            else: return self.sas_individual_out(log_ratio, metric_type, pi, approx)
-        def sas_global(self, log_ratio=True, metric_type=None, pi=None, static=False, approx=False):
-            if static: sas = self.sas_individual_out(log_ratio, metric_type, None, approx)
-            else: sas = self.sas_individual_out(log_ratio, metric_type, pi, approx)
+            else: return self.sas_individual_out(log, ratio, metric_type, pi, approx)
+        def sas_global(self, log=True, ratio=True, metric_type=None, pi=None, static=False, approx=False):
+            if static: sas = self.sas_individual_out(log, ratio, metric_type, None, approx)
+            else: sas = self.sas_individual_out(log, ratio, metric_type, pi, approx)
+            #if (not log) and ratio: sas = -np.log2(-sas)
             sas_mean = self.find_mean(sas.transpose(), pi, approx)
             try:
                 if len(sas_mean.shape)==2: sas_mean = np.diag(sas_mean)
@@ -1684,9 +1760,14 @@ class EgocentricSBM(MutableSequence):
                 if norm: return np.arange(l)/(l-1)
                 else: return np.arange(l)
 
-            def get_epsilon(self, norm=False):
-                if norm: return (self.epsilon - self.epsilon.min())/(self.epsilon.max() - self.epsilon.min())
-                else: return self.epsilon.copy()
+            def get_epsilon(self, norm=False, log=False, plot=False):
+                out = self.epsilon.copy()
+                if log: out = -np.log2(1+np.abs(out))
+                if norm: out = (out - out.min())/(out.max() - out.min())
+                if plot:
+                    import seaborn as sns
+                    sns.distplot(out).set_title('distribution of epsilon; norm=%s, log=%s'%(norm, log))
+                return out
 
             def get_betti(self, n=0, norm=False):
                 if n==0: out = self.betti0.copy()
@@ -1718,9 +1799,9 @@ class EgocentricSBM(MutableSequence):
                         for i in range(len(min_f)):
                             f[f[:,i]<min_f[i], i] = min_f[i]
                 
-            def plot(self, norm=False, clip_k=0):
+            def plot(self, norm=False, clip_k=0, log=False):
                 import matplotlib.pyplot as plt
-                x = self.get_epsilon(norm)
+                x = self.get_epsilon(norm, log)
                 epoch = self.get_epoch(norm)
                 betti0 = self.get_betti(0, norm)
                 betti1 = self.get_betti(1, norm)
@@ -1729,7 +1810,7 @@ class EgocentricSBM(MutableSequence):
                 if clip_k:
                     self.clip(del_betti0, clip_k, clip_k)
                     self.clip(del_betti1, clip_k, clip_k)
-                plt.figure(dpi=180)
+                plt.figure(dpi=90)
                 plt.subplot(2, 3, 1)
                 plt.plot(x, betti0)
                 plt.xlabel('epsilon')
@@ -1754,11 +1835,15 @@ class EgocentricSBM(MutableSequence):
                 plt.plot(epoch, betti1)
                 plt.xlabel('epoch')
                 plt.ylabel('betti1')
+                plt.figure(dpi=90)
+                plt.plot(epoch, x)
+                plt.xlabel('epoch')
+                plt.ylabel('epsilon')
                 plt.tight_layout()
                 plt.show()
 
-            def area(self, epsilon=True, norm=True):
-                if epsilon: x = self.get_epsilon(norm)
+            def area(self, epsilon=True, norm=True, log=False):
+                if epsilon: x = self.get_epsilon(norm, log)
                 else: x = self.get_epoch(norm)
                 betti0 = self.get_betti(0, norm)
                 betti1 = self.get_betti(1, norm)
