@@ -1753,7 +1753,31 @@ class EgocentricSBM(MutableSequence):
 
             def integrate(self, y, x): return np.trapz(y, x, axis=0)
 
-            def get_event(self): return '\n'.join([', '.join([self.dims[x[0]]+' <---> '+self.dims[x[1]] for x in e]) for e in self.event])
+            def factorize(self, delimiter_dim=',', delimiter_val=':'):
+                try: dims = [dict([tuple(d.split(delimiter_val)) for d in dim.split(delimiter_dim)]) for dim in self.dims]
+                except ValueError as err: raise ValueError('unable to factorize dimension names; ensure apt delimiter_dim and delimiter_val')
+                dims_dict = {k:list() for k in dims[0].keys()}
+                for i in range(len(dims)):
+                    try:
+                        for k in dims[i].keys(): dims_dict[k].append(dims[i][k])
+                    except: raise ValueError('unable to factorize dimension names; ensure identical dimension names')
+                return {k:tuple(dims_dict[k]) for k in dims_dict}
+
+            def get_event(self, key='', exact=False, selfjoin=False):
+                if key:
+                    if exact:
+                        if selfjoin: out = [tuple([(i, self.dims[x[0]]) for x in e if (key == self.dims[x[0]] and self.dims[x[0]] == self.dims[x[1]])]) for e, i in zip(self.event, range(len(self)))]
+                        else: out = [tuple([(i, self.dims[x[0]], self.dims[x[1]]) for x in e if (key == self.dims[x[0]] or key == self.dims[x[1]])]) for e, i in zip(self.event, range(len(self)))]
+                    else:
+                        if isinstance(key, str): key = [key]
+                        if selfjoin: out = [tuple([(i, self.dims[x[0]]) for x in e if (all([k in self.dims[x[0]] for k in key]) and self.dims[x[0]] == self.dims[x[1]])]) for e, i in zip(self.event, range(len(self)))]
+                        else: out = [tuple([(i, self.dims[x[0]], self.dims[x[1]]) for x in e if (all([k in self.dims[x[0]] for k in key]) or all([k in self.dims[x[1]] for k in key]))]) for e, i in zip(self.event, range(len(self)))]
+                    return tuple([x for x in out if x])
+                else: return tuple([tuple([(i, self.dims[x[0]], self.dims[x[1]]) for x in e]) for e, i in zip(self.event, range(len(self)))])
+
+            def get_history(self):
+                events = self.get_event()
+                return '\n'.join(['['+str(e[0][0])+'] '+' & '.join([x[1]+' <---> '+x[2] for x in e]) for e in events])
 
             def get_epoch(self, norm=False):
                 l = len(self)
@@ -1840,6 +1864,33 @@ class EgocentricSBM(MutableSequence):
                 plt.xlabel('epoch')
                 plt.ylabel('epsilon')
                 plt.tight_layout()
+                plt.show()
+
+            def plot_dist(self, by='', norm=True, log=False, delimiter_dim=',', delimiter_val=':'):
+                if by: names = self.factorize(delimiter_dim, delimiter_val)[by]
+                else: names = self.dims
+                names_set = list(set(names))
+                import matplotlib.pyplot as plt                
+                import seaborn as sns
+                epsilon = self.get_epsilon(norm, log)
+                epoch = self.get_epoch(norm)
+                epsilon_curve = list()
+                epoch_curve = list()
+                for name in names_set:
+                    a, b = zip(*[(epsilon[i], epoch[i]) for i in range(len(self)) if any([(names[j[0]]==name) | (names[j[1]]==name) for j in self.event[i]])])
+                    epsilon_curve.append(a)
+                    epoch_curve.append(b)
+                for name, epsilon in zip(names_set, epsilon_curve): sns.distplot(epsilon, hist=False, label=name)
+                plt.xlabel('epsilon')
+                plt.ylabel('density')
+                plt.title(by)
+                plt.legend()
+                plt.show()
+                for name, epoch in zip(names_set, epoch_curve): sns.distplot(epoch, hist=False, label=name)
+                plt.xlabel('epoch')
+                plt.ylabel('density')
+                plt.title(by)
+                plt.legend()
                 plt.show()
 
             def area(self, epsilon=True, norm=True, log=False):
