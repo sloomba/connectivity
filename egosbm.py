@@ -1,6 +1,584 @@
-from warnings import warn
-from collections.abc import MutableSequence
-import numpy as np
+from utils import *
+from gkde import GaussianKernelDistribution
+
+class CategoricalBlauDimension():
+
+    def __init__(self, size=None, value=None, pi=None, rho=None, omega=None, name=None):
+        self.name = str(name)
+        self.set_size(size)
+        self.set_value(value)
+        self.set_pi(pi)
+        self.set_rho(rho)
+        self.set_omega(omega)
+
+    def __len__(self): return self.size
+
+    def check_size(self, size):
+        if not isinstance(size, int): raise TypeError('expected number of categories to be a positive integer')
+        if size<=0: raise ValueError('expected number of categories to be a positive integer')
+
+    def check_value(self, value, size=None):
+        if size is None: size=len(self)
+        else: self.check_size(size)
+        if not isiterable_till(value): raise ValueError('expected value to be an iterable of strings containing category names')
+        if len(value)!=size: raise ValueError('expected number of value (%i) to be equal to number of categories (%i)'%(len(value), size))
+        if not isstring(value): raise ValueError('expected value to be string')
+
+    def check_pi(self, pi, size=None):
+        if size is None: size=len(self)
+        else: self.check_size(size)
+        if not isiterable_till(pi): raise ValueError('expected pi to be an iterable of floats')
+        if len(pi)!=size: raise ValueError('expected length of pi (%i) to be equal to number of categories (%i)'%(len(pi), size))
+        if any([p<0 for p in pi]) or not np.allclose(sum(pi), 1): raise ValueError('expected pi to be non-negative and sum up to 1')
+
+    def check_rho(self, rho, size=None):
+        if size is None: size=len(self)
+        else: self.check_size(size)
+        if not isiterable_till(rho): raise ValueError('expected rho to be an iterable of floats')
+        if len(rho)!=size: raise ValueError('expected length of rho (%i) to be equal to number of categories (%i)'%(len(rho), size))
+        if any([p<0 or p>1 for p in rho]): raise ValueError('expected rho to be a float between [0, 1] (inclusive)')
+
+    def check_omega(self, omega, size=None):
+        if size is None: size=len(self)
+        else: self.check_size(size)
+        if not isiterable_till(omega): raise ValueError('expected omega to be an iterable of numerics')
+        if len(omega)!=size: raise ValueError('expected length of omega (%i) to be equal to number of categories (%i)'%(len(omega), size))
+        if any([p<0 for p in omega]): raise ValueError('expected omega to be a non-negative numeric')
+
+    def check_prior_pi(self, prior, size=None):
+        if size is None: size=len(self)
+        else: self.check_size(size)
+        if isiterable(prior):
+            if len(prior)!=size or any([p<0 for p in prior]): raise ValueError('expected a non-negative alpha of length %i for Dirichlet prior on pi'%size)
+        elif prior<0: raise ValueError('expected a non-negative scalar alpha for Dirichlet prior on pi')
+
+    def check_prior_rho(self, prior, size=None):
+        if size is None: size=len(self)
+        else: self.check_size(size)
+        if not isinstance(prior, tuple) or len(prior)!=2: raise ValueError('expected a (alpha, beta) tuple for the Beta prior on rho')
+        if isiterable(prior[0]):
+            if len(prior[0])!=size or any([p<0 for p in prior[0]]): raise ValueError('expected a non-negative alpha of length %i for Beta prior on rho'%size)
+        elif prior[0]<0: raise ValueError('expected a non-negative scalar alpha for Beta prior on rho')
+        if isiterable(prior[1]):
+            if len(prior[1])!=size or any([p<0 for p in prior[1]]): raise ValueError('expected a non-negative beta of length %i for Beta prior on rho'%size)
+        elif prior[1]<0: raise ValueError('expected a non-negative scalar beta for Beta prior on rho')
+
+    def check_prior_omega(self, prior, size=None):
+        if size is None: size=len(self)
+        else: self.check_size(size)
+        if not isinstance(prior, tuple) or len(prior)!=2: raise ValueError('expected a (alpha, beta) tuple for the Gamma prior on omega')
+        if isiterable(prior[0]):
+            if len(prior[0])!=size or any([p<0 for p in prior[0]]): raise ValueError('expected a non-negative alpha of length %i for Gamma prior on omega'%size)
+        elif prior[0]<0: raise ValueError('expected a non-negative scalar alpha for Gamma prior on omega')
+        if isiterable(prior[1]):
+            if len(prior[1])!=size or any([p<0 for p in prior[1]]): raise ValueError('expected a non-negative beta of length %i for Gamma prior on omega'%size)
+        elif prior[1]<0: raise ValueError('expected a non-negative scalar beta for Gamma prior on omega')
+
+    def set_size(self, size=None):
+        if size is None: size = 1
+        self.check_size(size)
+        self.size = int(size)
+
+    def set_value(self, value=None):
+        if value is None: value = [str(i+1) for i in range(len(self))]
+        self.check_value(value)
+        self.value = tuple(value)
+
+    def set_pi(self, pi=None):
+        if pi is None: pi = [1/len(self)]*len(self)
+        elif not isiterable(pi): pi = [pi]*len(self)
+        self.check_pi(pi)
+        self.pi = tuple(pi)
+
+    def set_rho(self, rho=None):
+        if rho is None: rho = [1/len(self)]*len(self)
+        elif not isiterable(rho): rho = [rho]*len(self)
+        self.check_rho(rho)
+        self.rho = tuple(rho)
+
+    def set_omega(self, omega=None):
+        if omega is None: omega = [1.]*len(self)
+        elif not isiterable(omega): omega = [omega]*len(self)
+        self.check_omega(omega)
+        self.omega = tuple(omega)
+
+    def infer_pi(self, counts, prior=0.1, posterior=False, inplace=True, plot=False):
+        if not isiterable_till(counts): raise ValueError('expected counts to be an iterable')
+        if len(counts)!=len(self): raise ValueError('expected counts to be of length %i'%len(self))
+        if any([c<0 for c in counts]): raise ValueError('expected counts to be non-negative numerics')
+        
+        if prior is None:
+            sum_c = sum(counts)
+            pi = tuple([d/sum_c for d in counts])
+            if plot: self.plot(pi, label='inferred $\\pi$')
+        else:
+            self.check_prior_pi(prior)
+            from scipy.stats import dirichlet
+            if not isiterable(prior):
+                label = 'inferred $\\pi$ ($\\alpha$=%.2f)'%prior
+                prior = [prior]*len(self)
+            else: label = 'inferred $\\pi$'
+            #rv_prior = dirichlet(np.array(prior))
+            rv_posterior = dirichlet(np.array(prior) + np.array(counts))
+            pi = tuple(rv_posterior.mean())
+            if plot: self.plot(pi, np.sqrt(rv_posterior.var()), label=label)
+        if inplace: self.set_pi(pi)
+        else:
+            if posterior and prior is not None: return rv_posterior
+            else: return pi
+
+    def infer_rho(self, counts, prior=(1.0, 1.0), posterior=False, inplace=True, plot=False):
+        if not isinstance(counts, tuple): raise ValueError('expected a (counts_self, counts_total) tuple')
+        if not isiterable_till(counts[0]): raise ValueError('expected counts_self to be an iterable')
+        if len(counts[0])!=len(self): raise ValueError('expected counts_self to be of length %i'%len(self))
+        if any([c<0 for c in counts[0]]): raise ValueError('expected counts_self to be non-negative numerics')
+        if not isiterable_till(counts[1]): raise ValueError('expected counts_total to be an iterable')
+        if len(counts[0])!=len(self): raise ValueError('expected counts_total to be of length %i'%len(self))
+        if any([c<0 for c in counts[1]]): raise ValueError('expected counts_total to be non-negative numerics')
+        if any([c_self > c_total for c_self, c_total in zip(*counts)]): raise ValueError('expected counts_self <= counts_total')
+        
+        if prior is None:
+            rho = tuple([c_self/c_total for c_self, c_total in zip(*counts)])
+            if plot: self.plot(rho, label='inferred $\\rho$')
+        else:
+            self.check_prior_rho(prior)
+            from scipy.stats import beta
+            prior_alpha, prior_beta = prior
+            if not isiterable(prior_alpha) and not isiterable(prior_beta): label = 'inferred $\\rho$ ($\\alpha$=%.2f, $\\beta$=%.2f)'%prior
+            else: label = 'inferred $\\rho$'
+            if not isiterable(prior_alpha): prior_alpha = [prior_alpha]*len(self)
+            if not isiterable(prior_beta): prior_beta = [prior_beta]*len(self)
+            #rv_prior =[beta(a, b) for a, b in zip(prior_alpha, prior_beta)]
+            rv_posterior =[beta(a+c_self, b+c_total-c_self) for a, b, c_self, c_total in zip(prior_alpha, prior_beta, counts[0], counts[1])]
+            rho = tuple([rv.mean() for rv in rv_posterior])
+            if plot: self.plot(rho, np.sqrt([rv.var() for rv in rv_posterior]), label=label)
+        if inplace: self.set_rho(rho)
+        else:
+            if posterior and prior is not None: return rv_posterior
+            else: return rho
+
+    def infer_omega(self, counts, prior=(1.0, 1.0), posterior=False, inplace=True, plot=False):
+        if not isiterable_till(counts, 2): raise ValueError('expected counts to be an iterable of iterables')
+        if len(counts)!=len(self): raise ValueError('expected counts to be of length %i'%len(self))
+        if any([any([i<0 for i in c]) for c in counts]): raise ValueError('expected counts to be non-negative numerics')
+
+        if prior is None:
+            omega = tuple([sum(c)/len(c) for c in counts])
+            if plot: self.plot(omega, label='inferred $\\omega$')
+        else:
+            self.check_prior_omega(prior)
+            from scipy.stats import gamma
+            prior_alpha, prior_beta = prior
+            if not isiterable(prior_alpha) and not isiterable(prior_beta): label = 'inferred $\\omega$ ($\\alpha$=%.2f, $\\beta$=%.2f)'%prior
+            else: label = 'inferred $\\omega$'
+            if not isiterable(prior_alpha): prior_alpha = [prior_alpha]*len(self)
+            if not isiterable(prior_beta): prior_beta = [prior_beta]*len(self)
+            #rv_prior =[gamma(a, scale=1/b) for a, b in zip(prior_alpha, prior_beta)]
+            rv_posterior =[gamma(a+sum(c), scale=1/(b+len(c))) for a, b, c in zip(prior_alpha, prior_beta, counts)]
+            omega = tuple([rv.mean() for rv in rv_posterior])
+            if plot: self.plot(omega, np.sqrt([rv.var() for rv in rv_posterior]), label=label)
+        if inplace: self.set_omega(omega)
+        else:
+            if posterior and prior is not None: return rv_posterior
+            else: return omega
+
+    def mean(self, x=None):
+        if x is None: x = self.omega
+        if not isiterable_till(x) or len(x)!=len(self) or not isnumeric(x): raise ValueError('expected input to be an iterable of numerics of length %i'%len(self))
+        return sum([pi*v for pi, v in zip(self.pi, x)])
+
+    def align(self, other):
+        if isinstance(other, type(self)): other = [other]
+        scale = sum([x.mean() if isinstance(x, type(self)) else x for x in other])/(len(other)*self.mean())
+        omega = [scale*o for o in self.omega]
+        self.set_omega(omega)
+
+    def plot(self, y=None, errs=None, label=None):
+        if y is None:
+            y = self.pi
+            if label is None: label = 'pmf'
+        import matplotlib.pyplot as plt
+        x = np.arange(len(self))
+        if errs is None: plt.scatter(x, y, label=label)
+        else: plt.errorbar(x, y, yerr=errs, fmt='o', label=label)
+        plt.xticks(x, self.value)
+        if label is not None: plt.legend()
+        if self.name!=str(None): plt.xlabel(self.name)
+        plt.show()
+
+    def get_params(self): return {'name': self.name, 'blocks': self.value, 'pi': self.pi, 'rho':self.rho, 'omega':self.omega}
+
+class OrdinalBlauDimension():
+
+    def __init__(self, partition=None, pi=None, theta=None, omega=None, inverse=True, name=None):
+        self.name = str(name)
+        self.set_partition(partition, inverse=inverse)
+        self.set_pi(pi)
+
+    def __len__(self): return len(self.partition)-1
+
+    def check_size(self, size):
+        if not isinstance(size, int): raise TypeError('expected number of categories to be a positive integer')
+        if size<=0: raise ValueError('expected number of categories to be a positive integer')
+
+    def check_partition(self, partition):
+        if (not isiterable_till(partition)) or len(partition)<2 or partition[0]!=0 or partition[-1]!=1 or (np.diff(partition)<=0).any(): raise ValueError('expected partition to indicate disjoint interval boundaries over the complete continuous domain [0,1]')
+
+    def check_pi(self, pi):
+        rv_atts = ['pdf', 'cdf']
+        if not all([hasattr(pi, att) for att in rv_atts]): raise TypeError('expected a continuous distribution object such as scipy.stats.rv_continuous() with methods %s implemented'%rv_atts)
+
+    def check_theta(self, theta, size=None):
+        if size is None: size=len(self)
+        else: self.check_size(size)
+        if not isiterable_till(theta): raise ValueError('expected theta to be an iterable of numerics')
+        if len(theta)!=size: raise ValueError('expected length of theta (%i) to be equal to number of categories (%i)'%(len(theta), size))
+        #if not isnumeric(theta): raise ValueError('expected theta to be numeric')
+        if any([p>=0 for p in theta]): raise ValueError('expected theta to be a negative numeric')
+
+    def check_omega(self, omega, size=None):
+        if size is None: size=len(self)
+        else: self.check_size(size)
+        if not isiterable_till(omega): raise ValueError('expected omega to be an iterable of numerics')
+        if len(omega)!=size: raise ValueError('expected length of omega (%i) to be equal to number of categories (%i)'%(len(omega), size))
+        if any([p<0 for p in omega]): raise ValueError('expected omega to be a non-negative numeric')
+
+    def check_support(self, support, old=False):
+        if not isinstance(support, tuple) or len(support)!=2: raise ValueError('expected support to be an iterable of 2 numerics')
+        if old: lb, ub = self.support()
+        else: lb, ub = 0., 1.
+        if not isiterable(support[0]) and not isiterable(support[1]):
+            if support[0]>support[1]: raise ValueError('support interval must be of the form (lower_bound, upper_bound)')
+            if support[0]<lb: raise ValueError('given lower bound must be no less than %f'%lb)
+            if support[1]>ub: raise ValueError('given upper bound must be no more than %f'%ub)
+        else:
+            if any(support[0]>support[1]): raise ValueError('support interval must be of the form (lower_bound, upper_bound)')
+            if any(support[0]<lb): raise ValueError('given lower bound must be no less than %f'%lb)
+            if any(support[1]>ub): raise ValueError('given upper bound must be no more than %f'%ub)
+
+    def check_value(self, value, size=None):
+        if size is None: size=len(self)
+        else: self.check_size(size)
+        if not isiterable_till(value): raise ValueError('expected value to be an iterable of numerics')
+        if len(value)!=size: raise ValueError('expected length of value (%i) to be equal to number of categories (%i)'%(len(value), size))
+        if not isnumeric(value): raise ValueError('expected value to be numeric')
+
+    def check_prior_rho(self, prior, size=None):
+        if size is None: size=len(self)
+        else: self.check_size(size)
+        if not isinstance(prior, tuple) or len(prior)!=2: raise ValueError('expected a (alpha, beta) tuple for the Beta prior on rho')
+        if isiterable(prior[0]):
+            if len(prior[0])!=size or any([p<0 for p in prior[0]]): raise ValueError('expected a non-negative alpha of length %i for Beta prior on rho'%size)
+        elif prior[0]<0: raise ValueError('expected a non-negative scalar alpha for Beta prior on rho')
+        if isiterable(prior[1]):
+            if len(prior[1])!=size or any([p<0 for p in prior[1]]): raise ValueError('expected a non-negative beta of length %i for Beta prior on rho'%size)
+        elif prior[1]<0: raise ValueError('expected a non-negative scalar beta for Beta prior on rho')
+
+    def check_prior_omega(self, prior, size=None):
+        if size is None: size=len(self)
+        else: self.check_size(size)
+        if not isinstance(prior, tuple) or len(prior)!=2: raise ValueError('expected a (alpha, beta) tuple for the Gamma prior on omega')
+        if isiterable(prior[0]):
+            if len(prior[0])!=size or any([p<0 for p in prior[0]]): raise ValueError('expected a non-negative alpha of length %i for Gamma prior on omega'%size)
+        elif prior[0]<0: raise ValueError('expected a non-negative scalar alpha for Gamma prior on omega')
+        if isiterable(prior[1]):
+            if len(prior[1])!=size or any([p<0 for p in prior[1]]): raise ValueError('expected a non-negative beta of length %i for Gamma prior on omega'%size)
+        elif prior[1]<0: raise ValueError('expected a non-negative scalar beta for Gamma prior on omega')
+
+    def old2new(self, old): return tuple(self.pi.cdf(old))
+
+    def new2old(self, new): return tuple(self.pi.ppf(new))
+
+    def support(self):
+        try: return self.pi.support()
+        except: return (self.pi.ppf(0.), self.pi.ppf(1.))
+
+    def get_partition(self, partition=None, k=1, inverse=False, center=False, precision=None, string=False):
+        if partition is None: partition = self.partition
+        else: self.check_partition(partition)
+        if k>1: partition = tuple(np.hstack([np.linspace(partition[i], partition[i+1], k+1)[:-1] for i in range(len(partition)-1)] + [partition[-1]]))
+        if inverse: partition = self.new2old(partition)
+        if center: partition = tuple(0.5*(np.array(partition[:-1])+np.array(partition[1:])))
+        if precision is not None: partition = tuple(np.around(partition, precision))
+        if string: 
+            if center: partition = tuple([str(a) for a in partition])
+            else: partition = tuple([str(a)+' to '+str(b) for (a, b) in zip(partition[:-1], partition[1:])])
+        return partition
+
+    def map_partition(self, partition, values=None):
+        if values is None: values = np.arange(len(self))
+        elif not isiterable(values) or len(values)!=len(self): raise ValueError('expected values to be an iterable of length %i'%len(self))
+        self.check_partition(partition)
+        i = 0
+        num = len(partition)
+        out = list()
+        for j in range(len(self)):
+            while i<num and partition[i]<self.partition[j+1]:
+                i += 1
+                out.append(values[j])
+            if partition[i]!=self.partition[j+1]: raise ValueError('given partition must at least as fine as the set partition of the dimension')
+        return tuple(out)
+
+    def pmf(self, partition=None): return tuple(np.diff(self.pi.cdf(self.get_partition(partition, inverse=True))))
+
+    def pdf(self, partition=None, inverse=False): return tuple(np.array(self.pmf(partition))/np.diff(self.get_partition(partition, inverse=inverse)))
+
+    def get_rho(self, partition=None, correct=True, plot=False, annot=False):
+        
+        def f_rho_self(c, a, b):
+            logterm = (np.exp(2*c*(1-b))-2*np.exp(c*(1-b))+np.exp(c))/(np.exp(2*c*(1-a))-2*np.exp(c*(1-a))+np.exp(c))
+            arctanh = ((np.exp(c*a)-np.exp(c*b))*(1-np.exp(c))**0.5)/(np.exp(c)+np.exp(c*(a+b))-np.exp(c*a)-np.exp(c*b))
+            return np.exp(-c*a) + (np.exp(-c*a)-np.exp(-c*(1-b)))/(2*c*(b-a))*np.log(logterm) - (np.exp(-c*a)+np.exp(-c*(1-b))-2)/(2*c*(1-np.exp(c))**0.5*(b-a))*np.log((1+arctanh)/(1-arctanh))
+        
+        def f_rho_low(c, a, b, p, q):
+            logterm = (np.exp(2*c*(1-b))-2*np.exp(c*(1-b))+np.exp(c))/(np.exp(2*c*(1-a))-2*np.exp(c*(1-a))+np.exp(c))
+            arctanh = ((np.exp(c*a)-np.exp(c*b))*(1-np.exp(c))**0.5)/(np.exp(c)+np.exp(c*(a+b))-np.exp(c*a)-np.exp(c*b))
+            return (np.exp(-c*q)-np.exp(-c*p))/(2*c*(b-a))*(-2*c*(b-a) - np.log(logterm) + 1/(1-np.exp(c))**0.5*np.log((1+arctanh)/(1-arctanh)))
+        
+        def f_rho_high(c, a, b, p, q):
+            logterm = (np.exp(2*c*(1-b))-2*np.exp(c*(1-b))+np.exp(c))/(np.exp(2*c*(1-a))-2*np.exp(c*(1-a))+np.exp(c))
+            arctanh = ((np.exp(c*a)-np.exp(c*b))*(1-np.exp(c))**0.5)/(np.exp(c)+np.exp(c*(a+b))-np.exp(c*a)-np.exp(c*b))
+            return (np.exp(-c*(1-p))-np.exp(-c*(1-q)))/(2*c*(b-a))*(np.log(logterm)+1/(1-np.exp(c))**0.5*np.log((1+arctanh)/(1-arctanh)))
+        
+        partition = self.get_partition(partition)
+        theta = self.map_partition(partition, self.theta)
+        num = len(partition)-1
+        rho = np.zeros((num, num))
+        for i in range(num):
+            a, b = partition[i], partition[i+1]
+            for j in range(i):
+                p, q = partition[j], partition[j+1]
+                rho[i][j] = f_rho_low(theta[i], a, b, p, q)
+            rho[i][i] = f_rho_self(theta[i], a, b)
+            for j in range(i+1, num):
+                p, q = partition[j], partition[j+1]
+                rho[i][j] = f_rho_high(theta[i], a, b, p, q)
+        if correct: rho /= rho.sum(1)[:, np.newaxis]
+        if plot: self.plot_mat(rho, title='$\\rho$', annot=annot)
+        return rho
+
+    def set_partition(self, partition=None, k=1, inverse=False):
+        if partition is None: partition = self.get_partition((0., 1.), k=k)
+        elif inverse: partition = self.old2new(partition)
+        self.check_partition(partition)
+        self.partition = tuple(partition)
+        self.set_theta()
+        self.set_omega()
+
+    def set_pi(self, pi=None):
+        if pi is None:
+            from scipy.stats import uniform
+            pi = uniform()
+        self.check_pi(pi)
+        self.pi = pi
+
+    def set_theta(self, theta=None):
+        if theta is None: theta = [-1.]*len(self)
+        elif not isiterable(theta): theta = [theta]*len(self)
+        self.check_theta(theta)
+        self.theta = tuple(theta)
+
+    def set_omega(self, omega=None):
+        if omega is None: omega = [1.]*len(self)
+        elif not isiterable(omega): omega = [omega]*len(self)
+        self.check_omega(omega)
+        self.omega = tuple(omega)
+
+    def infer_pi(self, data, bins=None, set_partition=True, inplace=True, plot=False, name=None):
+        if name is None: name = self.name+'.pi'
+        if bins is None: pi = GaussianKernelDistribution(data=data, name=name)
+        else:
+            from scipy.stats import rv_histogram
+            pi = rv_histogram((data, bins), name=name)
+        if plot: self.plot_old(y=pi.pdf, label='inferred $\\pi$')
+        if inplace:
+            self.set_pi(pi)
+            if set_partition: self.set_partition(bins, inverse=True)
+        else: return pi
+
+    def infer_rho(self, counts, k=None, prior=(1.0, 1.0), posterior=False, plot=False):
+        if k is None: k=len(self)
+        if not isinstance(counts, tuple): raise ValueError('expected a (counts_self, counts_total) tuple')
+        if not isiterable_till(counts[0]): raise ValueError('expected counts_self to be an iterable')
+        if len(counts[0])!=k: raise ValueError('expected counts_self to be of length %i'%k)
+        if any([c<0 for c in counts[0]]): raise ValueError('expected counts_self to be non-negative numerics')
+        if not isiterable_till(counts[1]): raise ValueError('expected counts_total to be an iterable')
+        if len(counts[0])!=k: raise ValueError('expected counts_total to be of length %i'%k)
+        if any([c<0 for c in counts[1]]): raise ValueError('expected counts_total to be non-negative numerics')
+        if any([c_self > c_total for c_self, c_total in zip(*counts)]): raise ValueError('expected counts_self <= counts_total')
+        
+        if prior is None:
+            rho = tuple([c_self/c_total for c_self, c_total in zip(*counts)])
+            if plot: self.plot(rho, label='inferred $\\rho$')
+        else:
+            self.check_prior_rho(prior)
+            from scipy.stats import beta
+            prior_alpha, prior_beta = prior
+            if not isiterable(prior_alpha) and not isiterable(prior_beta): label = 'inferred $\\rho$ ($\\alpha$=%.2f, $\\beta$=%.2f)'%prior
+            else: label = 'inferred $\\rho$'
+            if not isiterable(prior_alpha): prior_alpha = [prior_alpha]*k
+            if not isiterable(prior_beta): prior_beta = [prior_beta]*k
+            #rv_prior =[beta(a, b) for a, b in zip(prior_alpha, prior_beta)]
+            rv_posterior =[beta(a+c_self, b+c_total-c_self) for a, b, c_self, c_total in zip(prior_alpha, prior_beta, counts[0], counts[1])]
+            rho = tuple([rv.mean() for rv in rv_posterior])
+            if plot: self.plot(rho, np.sqrt([rv.var() for rv in rv_posterior]), label=label)
+        if posterior and prior is not None: return rv_posterior
+        else: return rho
+
+    def infer_theta(self, counts, window=None, partition=None, prior=(1.0, 1.0), init=-1., maxiter=10000, inplace=True, plot=False):
+        from scipy.optimize import fsolve
+
+        def f_window(theta, window, constant=0.):
+            def f(x, y): return (x**(2-2*y)*(2*x**y-1)**2 + x**(2*y)*(2*x**(1-y)-1)**2 + 2*x*(1-2*x))/(1-x)**2
+            def g(x, y): return (1-x)**0.5/(1+(x**(1-y)-x**y)/(2*(x**(y-1)-1)))
+            a = np.exp(-theta)
+            b = np.exp(theta)
+            logterm = f(a, window)
+            arctanh = g(b, window)
+            return constant + window + (1/(2*theta))*np.log(logterm) + ((b**window-1)/(2*theta*(1-b)**0.5))*np.log((1+arctanh)/(1-arctanh))
+
+        def f_partition(c, a, b, constant=0.):
+            logterm = (np.exp(2*c*(1-b))-2*np.exp(c*(1-b))+np.exp(c))/(np.exp(2*c*(1-a))-2*np.exp(c*(1-a))+np.exp(c))
+            arctanh = ((np.exp(c*a)-np.exp(c*b))*(1-np.exp(c))**0.5)/(np.exp(c)+np.exp(c*(a+b))-np.exp(c*a)-np.exp(c*b))
+            return constant + np.exp(-c*a) + (np.exp(-c*a)-np.exp(-c*(1-b)))/(2*c*(b-a))*np.log(logterm) - (np.exp(-c*a)+np.exp(-c*(1-b))-2)/(2*c*(1-np.exp(c))**0.5*(b-a))*np.log((1+arctanh)/(1-arctanh))
+
+        if window is None:
+            partition = self.get_partition(partition)
+            rho = self.infer_rho(counts, k=len(partition)-1, prior=prior, posterior=True)
+            theta = []
+            if prior is not None:
+                rho_std = [np.sqrt(x.var()) for x in rho]
+                rho = [x.mean() for x in rho]
+                theta_std = []
+                for i in range(len(rho_std)):
+                    theta_lower = fsolve(f_partition, init, (partition[i], partition[i+1], -(rho[i]-rho_std[i])), maxfev=maxiter)[0]
+                    theta_upper = fsolve(f_partition, init, (partition[i], partition[i+1], -(rho[i]+rho_std[i])), maxfev=maxiter)[0]
+                    theta_std.append([theta_lower, theta_upper])
+                theta_std = np.array(theta_std).transpose()  
+            for i in range(len(rho)): theta.append(fsolve(f_partition, init, (partition[i], partition[i+1], -rho[i]), maxfev=maxiter)[0])
+            if plot:
+                if prior is not None: self.plot_new(theta, theta_std, label='inferred $\\theta$ ($\\alpha_\\rho$=%.2f, $\\beta_\\rho$=%.2f)'%prior)
+                else: self.plot_new(theta, label='inferred $\\theta$')
+        else:
+            if partition is None:
+                if window<=0. or window>=0.5: raise ValueError('expected window to be between (0, 0.5) (exclusive)')
+                if not isinstance(counts, tuple): raise ValueError('expected a (counts_self, counts_total) tuple')
+                rho = self.infer_rho(([counts[0]], [counts[1]]), k=1, prior=prior, posterior=True)
+                if prior is not None:
+                    rho_std = np.sqrt(rho[0].var())
+                    rho = rho[0].mean()
+                    theta_lower = fsolve(f_window, init, (window, -(rho-rho_std)), maxfev=maxiter)[0]
+                    theta_upper = fsolve(f_window, init, (window, -(rho+rho_std)), maxfev=maxiter)[0]
+                theta = fsolve(f_window, init, (window, -rho), maxfev=maxiter)[0]
+            else: raise ValueError('expected exactly one of window or partition to be provided')
+            if plot:
+                if prior is not None: self.plot_new(theta, theta_std, label='inferred $\\theta$ ($\\alpha_\\rho$=%.2f, $\\beta_\\rho$=%.2f)'%prior)
+                else: self.plot_new(theta, label='inferred $\\theta$')
+        if len(theta)==1: theta = theta[0]
+        else: theta = tuple(theta)
+        if inplace:
+            if partition is not None:
+                if tuple(partition)!=self.get_partition(): warn('setting theta inferred on partition %s different from set partition %s'%(str(partition), str(self.get_partition())))
+            self.set_theta(theta)
+        else: return theta
+
+    def infer_omega(self, counts, k=None, prior=(1.0, 1.0), inplace=True, plot=False):
+        if k is None: k=len(self)
+        if not isiterable_till(counts, 2): raise ValueError('expected counts to be an iterable of iterables')
+        if len(counts)!=k: raise ValueError('expected counts to be of length %i'%k)
+        if any([any([i<0 for i in c]) for c in counts]): raise ValueError('expected counts to be non-negative numerics')
+
+        if prior is None:
+            omega = tuple([sum(c)/len(c) for c in counts])
+            if plot: self.plot_new(omega, label='inferred $\\omega$')
+        else:
+            self.check_prior_omega(prior)
+            from scipy.stats import gamma
+            prior_alpha, prior_beta = prior
+            if not isiterable(prior_alpha) and not isiterable(prior_beta): label = 'inferred $\\omega$ ($\\alpha$=%.2f, $\\beta$=%.2f)'%prior
+            else: label = 'inferred $\\omega$'
+            if not isiterable(prior_alpha): prior_alpha = [prior_alpha]*k
+            if not isiterable(prior_beta): prior_beta = [prior_beta]*k
+            #rv_prior =[gamma(a, scale=1/b) for a, b in zip(prior_alpha, prior_beta)]
+            rv_posterior =[gamma(a+sum(c), scale=1/(b+len(c))) for a, b, c in zip(prior_alpha, prior_beta, counts)]
+            omega = tuple([rv.mean() for rv in rv_posterior])
+            if plot: self.plot_new(omega, np.sqrt([rv.var() for rv in rv_posterior]), label=label)
+        if inplace: self.set_omega(omega)
+        else: return omega
+
+    def mean(self, x=None):
+        if x is None: x = self.get_partition(inverse=True, center=True)
+        else: self.check_value(x)
+        return sum([pi*v for pi, v in zip(self.pmf(), x)])
+
+    def var(self, x=None, mean=None):
+        if x is None: x = self.get_partition(inverse=True, center=True)
+        else: self.check_value(x)
+        if mean is None: mean = self.mean(x)
+        return self.mean([(v-mean)**2 for v in x])
+
+    def gini(self):
+        x = self.get_partition(inverse=True)
+        x_bar = self.get_partition(inverse=True, center=True)
+        pi = self.pmf()
+        g = 0.
+        for i in range(len(self)):
+            g += pi[i]**2*(x[i+1]-x[i])/6
+            for j in range(i): g += pi[i]*pi[j]*(x_bar[i]-x_bar[j])
+        g /= 2*self.mean()
+        return g
+
+    def align(self, other):
+        if isinstance(other, type(self)): other = [other]
+        scale = sum([x.mean(x.omega) if isinstance(x, type(self)) else x for x in other])/(len(other)*self.mean(self.omega))
+        omega = [scale*o for o in self.omega]
+        self.set_omega(omega)
+
+    def plot_old(self, x=1000, y=None, errs=None, label=None):
+        if isinstance(x, int):
+            a, b = self.support()
+            x = np.linspace(a, b, x)
+        if y is None:
+            y = self.pi.pdf
+            if label is None: label = 'pdf'
+        if callable(y): y = y(x)
+        import matplotlib.pyplot as plt
+        if errs is None: plt.plot(x, y, label=label)
+        else: plt.errorbar(x, y, yerr=errs, label=label)
+        if label is not None: plt.legend()
+        plt.show()
+
+    def plot_new(self, y=None, errs=None, label=None):
+        x = self.get_partition()
+        x_mid = self.get_partition(center=True)
+        if y is None:
+            y = self.pdf
+            if label is None: label = 'pdf'
+        if callable(y): y = y(x)
+        import matplotlib.pyplot as plt
+        if len(y)==len(self):
+            y_toplot = []
+            x_toplot = []
+            for i in range(len(y)):
+                y_toplot += [y[i], y[i]]
+                x_toplot += [x[i], x[i+1]]
+            plt.plot(x_toplot, y_toplot, label=label)
+            if errs is not None: plt.errorbar(x_mid, y, yerr=errs, label='error in '+label)
+        else:
+            if errs is None: plt.plot(x, y, label=label)
+            else: plt.errorbar(x, y, yerr=errs, label=label)
+        for i in x: plt.gca().axvline(i, ls='--', alpha=0.5)
+        if label is not None: plt.legend()
+        plt.show()
+
+    def plot_mat(self, matrix, annot=False, labels=False, title=''):
+        import seaborn as sns
+        import matplotlib.pyplot as plt
+        sns.heatmap(matrix, annot=annot, fmt='.2f', square=True, cmap='Spectral', xticklabels=labels, yticklabels=labels)
+        if title: plt.title(title)
+        plt.show()
+
+    def get_params(self, center=False, precision=1): return {'name': self.name, 'blocks': self.get_partition(inverse=True, center=center, precision=precision, string=True), 'pi': self.pmf(), 'rho':tuple([tuple(x) for x in self.get_rho()]), 'omega':self.omega}
 
 class EgocentricSBM(MutableSequence):
     
@@ -59,7 +637,7 @@ class EgocentricSBM(MutableSequence):
             self.__init__(params['shape'], params['dims'], params['name'])
             self.check_consistency(pi=params['pi'], rho=params['rho'], omega=params['omega'])
             self.pi = tuple([tuple(x) for x in params['pi']])
-            self.rho = tuple([tuple(x) for x in params['rho']])
+            self.rho = tuple([tuple([tuple(y) if isiterable(y) else y for y in x]) for x in params['rho']])
             self.omega = tuple([tuple(x) for x in params['omega']])
             self.precision = params['precision']
         except Exception as err:
@@ -181,6 +759,22 @@ class EgocentricSBM(MutableSequence):
         key = self.get_key(key)
         if self.iterable(key): return tuple([self.dims[k][1] for k in key])
         else: return self.dims[key][1]
+
+    def get_rho(self, full=False):
+        out = []
+        for i in range(len(self)):
+            rhos = []
+            pi = self.pi[i]
+            for j in range(self.shape[i]):
+                rho = self.rho[i][j]
+                if full:
+                    if isiterable(rho): rhos.append(rho)
+                    else: rhos.append(tuple([(1-rho)*pi[k]/(1-pi[j]) for k in range(j)] + [rho] + [(1-rho)*pi[k]/(1-pi[j]) for k in range(j+1, self.shape[i])]))
+                else:
+                    if isiterable(rho): rhos.append(rho[j])
+                    else: rhos.append(rho)
+            out.append(tuple(rhos))
+        return tuple(out)
 
     def keys(self): return tuple(self.dimsdict.keys())
 
@@ -427,8 +1021,10 @@ class EgocentricSBM(MutableSequence):
         except TypeError: return False
     
     def find_sum(self, list_of_vecs, approx=False, collapse=False):
-        out = [sum(v) for v in list_of_vecs]
-        if collapse: out = sum(out)/len(out)
+        if isiterable_till(list_of_vecs, 2):
+            out = [sum(v) for v in list_of_vecs]
+            if collapse: out = sum(out)/len(out)
+        else: out = sum(list_of_vecs)
         if approx: out = self.apx(out)
         return out
 
@@ -463,6 +1059,20 @@ class EgocentricSBM(MutableSequence):
     def isambiphilous(self): return [[u==v for u,v in zip(i,j)] for i,j in zip(self.apx(self.pi), self.apx(self.rho))]
 
     def homophily(self, log=True, approx=False): return [self.find_ratio(j, i, log, approx) for i,j in zip(self.pi, self.rho)]
+
+    def named(self, obj):
+        if self.iterable(obj):
+            names = self.dims
+            out = dict()
+            if len(obj)!=len(names): raise ValueError('object dimension (%i) must match dimensions of sbm (%i)'%(len(obj), len(names)))
+            if all([self.iterable(o) for o in obj]):
+                for i in range(len(names)):
+                    if len(obj[i])!=len(names[i][1]): raise ValueError('object dimension (%i,%i) must match dimensions of sbm (%i,%i)'%(i+1, len(obj[i]), i+1, len(names[i][1])))
+                    out[str(names[i][0])] = dict(zip(map(str, names[i][1]), obj[i]))
+            else:
+                for i in range(len(names)): out[str(names[i][0])] = obj[i]
+            return out
+        else: raise ValueError('expected iterable object of length %i, or nested iterable object of shape %s'%(len(self), self.shape))
     
     def sum_pi(self, pi=None, approx=False, collapse=False):
         if pi is None: pi = self.pi
@@ -583,8 +1193,14 @@ class EgocentricSBM(MutableSequence):
         for i in range(len(rho)):
             if not self.iterable(rho[i]): raise TypeError('rho for dimension %s must be an iterable'%i)
             if len(rho[i])!=self.shape[i]: raise ValueError('provide rho for all blocks of dimension %s'%i)
-            if not all([0<=j<=1 for j in rho[i]]): raise ValueError('rho must be between 0 and 1 (inclusive); see dimension %s'%i)
-            if not all(rho[i][j]==0 for j in range(self.shape[i]) if omega[i][j]==0): raise ValueError('rho must be 0 for a community with omega 0; see dimension %s'%i)
+            for j in range(len(rho[i])):
+                if isiterable(rho[i][j]):
+                    if len(rho[i][j])!=self.shape[i]: raise ValueError('provide rho w.r.t. all blocks for dimension %s block %s'%(i,j))
+                    if omega[i][j]==0 and not all([k==0 for k in rho[i][j]]): raise ValueError('rho must be 0 for a community with omega 0; see dimension %s'%i)
+                    elif not all([0<=k<=1 for k in rho[i][j]]) or self.sum_rho(rho[i][j], approx=True)!=1: raise ValueError('rho must be between 0 and 1 (inclusive) and sum up to 1; see dimension %s block %s'%(i,j))
+                else:
+                    if omega[i][j]==0 and rho[i][j]!=0: raise ValueError('rho must be 0 for a community with omega 0; see dimension %s block %s'%(i,j))
+                    elif not 0<=rho[i][j]<=1: raise ValueError('rho must be between 0 and 1 (inclusive); see dimension %s block %s'%(i,j))
 
     def get_dims(self):
         from itertools import product
@@ -1021,7 +1637,10 @@ class EgocentricSBM(MutableSequence):
                 if not (ego>=0).all(): raise ValueError('entries of count/block matrix must be non-negative')
                 if counts:
                     warn('assuming given matrix is a count matrix to be normalised w.r.t. pi', RuntimeWarning)
-                    self.psi = (ego*np.dot((1/pi)[:,np.newaxis], (1/pi)[np.newaxis,:]),)
+                    tmp = ego*np.dot((1/pi)[:,np.newaxis], (1/pi)[np.newaxis,:])
+                    tmp[np.isnan(tmp)] = 0.
+                    tmp[np.isinf(tmp)] = 0.
+                    self.psi = (tmp,)
                 else:
                     warn('assuming given matrix is a block matrix; if otherwise use counts=True', RuntimeWarning)
                     self.psi = (ego.copy(),)
@@ -1034,7 +1653,7 @@ class EgocentricSBM(MutableSequence):
                 self.load(filepath)
                 if name is not None: self.name = str(name)
                 return
-            if mode not in ['full', 'pp', 'ppcollapsed']: raise ValueError('invalid model mode "%s"'%mode)
+            if mode not in ['full', 'eda', 'pp', 'ppcollapsed']: raise ValueError('invalid model mode "%s"'%mode)
             if name is None: name = ego.name + '.sbm'
             self.mode = mode
             self.name = str(name)
@@ -1049,7 +1668,12 @@ class EgocentricSBM(MutableSequence):
             self.meanomega = ego.mean_omega()
             
             if mode=='full':
-                self.params = tuple([tuple([(o, r/p, (1-r)/(1-p)) if p!=1 else (o, 1., 0.) for r, o, p in zip(ego.rho[i], ego.omega[i], ego.pi[i])]) for i in range(ego.ndim)])
+                rho = ego.get_rho(full=True)
+                self.params = tuple([tuple([(o, r, p) for r, o, p in zip(rho[i], ego.omega[i], ego.pi[i])]) for i in range(ego.ndim)])
+                self.psi = tuple([(np.diag([x[0] for x in item]), np.array([x[1] for x in item])/np.array([x[2] for x in item])[np.newaxis, :]) for item in self.params])
+            elif mode=='eda':
+                rho = ego.get_rho(full=False)
+                self.params = tuple([tuple([(o, r/p, (1-r)/(1-p)) if p!=1 else (o, 1., 0.) for r, o, p in zip(rho[i], ego.omega[i], ego.pi[i])]) for i in range(ego.ndim)])
                 self.psi = tuple([(np.diag([x[0] for x in item]), np.diag([x[1]-x[2] for x in item])+np.vstack([x[2]*np.ones(len(item)) for x in item])) for item in self.params])
             elif mode=='pp': #planted-partition model
                 self.params = (self.meanomega, tuple([(r/p, (1-r)/(1-p)) if p!=1 else (1., 0.) for r, p in zip(ego.mean_rho(), ego.dev_pi())]))
@@ -1131,6 +1755,34 @@ class EgocentricSBM(MutableSequence):
             
         def get_shape(self): return int(self.kron(self.shape))
 
+        def get_dims(self, values=dict(), delimiter_dim=',', delimiter_val=':', unique=True):
+            try: dims = [dict([tuple(d.split(delimiter_val)) for d in dim.split(delimiter_dim)]) for dim in self.dims]
+            except ValueError as err: raise ValueError('unable to factorize dimension names; ensure apt delimiter_dim and delimiter_val')
+            dims_dict = {k:list() for k in dims[0].keys()}
+            if values:
+                for i in range(len(dims)):
+                    try:
+                        for k in dims[i].keys(): dims_dict[k].append(values[k][dims[i][k]])
+                    except: raise ValueError('unable to factorize dimension names; ensure identical dimension names')
+            else:
+                for i in range(len(dims)):
+                    try:
+                        for k in dims[i].keys(): dims_dict[k].append(dims[i][k])
+                    except: raise ValueError('unable to factorize dimension names; ensure identical dimension names')
+            if unique: return {k:tuple(set(dims_dict[k])) for k in dims_dict}
+            else: return {k:tuple(dims_dict[k]) for k in dims_dict}
+
+        def get_index(self, names, logic='and'):
+            dim_names = self.get_dims()
+            for key in names:
+                if key not in dim_names: raise ValueError('no such dim name "%s" found'%key)
+                if names[key] not in dim_names[key]: raise ValueError('no such dim value "%s" for dim name "%s" found; choose from %s'%(names[key], key, set(dim_names[key])))
+            index = np.array([np.array(dim_names[key])==names[key] for key in names])
+            if logic=='and': index = index.all(0)
+            elif logic=='or': index = index.any(0)
+            else: raise ValueError('could not identify logic "%s"; use "and"/"or"'%logic)
+            return index
+
         def check_pi(self, pi):
             if len(pi)==self.ndim:
                 for i in self.ndim:
@@ -1143,7 +1795,7 @@ class EgocentricSBM(MutableSequence):
         
         def get_pi(self, pi=None, approx=False):
             if pi is None: return self.kron(self.pi)
-            if isinstance(pi, str):
+            elif isinstance(pi, str):
                 if pi=='uni': return (1/self.get_shape())*np.ones([self.get_shape()])
                 else: raise ValueError('unknown value of pi "%s"; did you mean "uni" for uniform distribution?'%pi)
             try: #pi as matrix
@@ -1158,34 +1810,61 @@ class EgocentricSBM(MutableSequence):
             if approx: return self.apx(pi)
             else: return np.array(pi)
             
-        def get_psi(self, directed=None, log=False, ratio=False, approx=False, sort=False):
-            if self.mode=='ppcollapsed': out = self.kron(self.psi, self.meanomega)
-            elif self.mode=='pp': out = np.matmul(self.kron([x[0] for x in self.psi], self.meanomega), self.kron([x[1] for x in self.psi]))
-            elif self.mode=='full': out =  np.matmul(self.kron([x[0] for x in self.psi], self.meanomega), self.kron([x[1] for x in self.psi]))
-            elif self.mode=='global': out = self.psi[0]
+        def get_psi(self, psi=None, constant_degree=False, directed=None, log=False, ratio=False, approx=False, sort=False):
+            if psi is None:
+                if self.mode=='ppcollapsed': psi = self.kron(self.psi, self.meanomega)
+                elif self.mode in ['pp', 'eda', 'full']:
+                    if constant_degree: psi = self.meanomega*self.kron([x[1] for x in self.psi])
+                    else: psi = np.matmul(self.kron([x[0] for x in self.psi], self.meanomega), self.kron([x[1] for x in self.psi]))
+                elif self.mode=='global': psi = self.psi[0].copy()
+            elif isinstance(psi, str):
+                if psi=='uni':
+                    if constant_degree: psi = self.meanomega*np.ones((len(self), len(self)))
+                    else: psi = np.matmul(self.kron([x[0] for x in self.psi], self.meanomega), np.ones((len(self), len(self))))
+                else: raise ValueError('unknown value of psi "%s"; did you mean "uni" for uniform?'%psi)
+            else: raise ValueError('unknown value of psi; did you mean "uni" for uniform?')
             if directed is None: directed = self.directed
             if not directed:
                 if self.directed: warn('symmetrising the stochastic block matrix', RuntimeWarning)
-                out = (out + out.transpose())/2
+                psi = (psi + psi.transpose())/2
             if sort:
-                idx = np.argsort(np.diag(out), kind='mergesort')[::-1] #sort by decreasing homophily
-                out = out[idx,:][:,idx]
-            if ratio: out /= np.diag(out)[:,np.newaxis]
-            if log: out = np.log2(out)
+                idx = np.argsort(np.diag(psi), kind='mergesort')[::-1] #sort by decreasing homophily
+                psi = psi[idx,:][:,idx]
+            if ratio: psi /= np.diag(psi)[:,np.newaxis]
+            if log: psi = np.log2(psi)
+            if approx: psi = self.apx(psi)
+            return psi
+
+        def get_pipsi(self, pi=None, psi=None, constant_degree=False, mode='out', order='pre', normalization=None, scale=0.9):
+            pi = self.get_pi(pi)
+            if mode=='out': psi = self.get_psi(psi, constant_degree=constant_degree)
+            elif mode=='in': psi = self.get_psi(psi, constant_degree=constant_degree).transpose()
+            elif mode=='sym': psi = self.get_psi(psi, constant_degree=constant_degree, directed=False)
+            else: raise ValueError('mode "%s" not recognized; choose from %s'%('out', 'in', 'sym'))
+            if order=='pre': out = pi[:,np.newaxis]*psi
+            elif order=='post': out = pi[np.newaxis,:]*psi
+            else: raise ValueError('order "%s" not recognized; choose from %s'%('pre', 'post'))
+            if normalization is not None:
+                if normalization=='random_walk':
+                    out /= np.dot(psi, pi)[:,np.newaxis]
+                elif normalization=='schur_stable':
+                    lambda_max = max(abs(np.linalg.eigvals(out)))
+                    if scale<=0 or scale>=1: raise ValueError('expected scale to be between (0,1) (exclusive) to ensure Schur stability')
+                    out /= lambda_max/scale
+                else: raise ValueError('could not recognize normalization "%s"; expected from %s'%('random_walk', 'schur_stable'))
+            return out
+
+        def get_omega(self, psi=None, constant_degree=False, directed=None, approx=False): return self.find_mean(self.get_psi(psi, constant_degree=constant_degree, directed=directed, approx=approx), pi=None, approx=approx)
+
+        def get_rho(self, psi=None, constant_degree=False, directed=None, approx=False):
+            out = np.diag(self.get_psi(psi, constant_degree=constant_degree, directed=directed))*self.get_pi()/self.get_omega(constant_degree=constant_degree, directed=directed)
             if approx: out = self.apx(out)
             return out
 
-        def get_omega(self, directed=None, approx=False): return self.find_mean(self.get_psi(directed, approx=approx), pi=None, approx=approx)
-
-        def get_rho(self, directed=None, approx=False):
-            out = np.diag(self.get_psi(directed))*self.get_pi()/self.get_omega(directed)
-            if approx: out = self.apx(out)
-            return out
-
-        def get_laplacian(self, mode='out', pi=None, norm=False, sym=False):
-            if mode=='out': psi = self.get_psi()
-            elif mode=='in': psi = self.get_psi().transpose()
-            elif mode=='sym': psi = self.get_psi(directed=False)
+        def get_laplacian(self, mode='out', pi=None, psi=None, norm=False, sym=False):
+            if mode=='out': psi = self.get_psi(psi)
+            elif mode=='in': psi = self.get_psi(psi).transpose()
+            elif mode=='sym': psi = self.get_psi(psi, directed=False)
             else: raise ValueError('mode "%s" not recognized; use "out"/"in"/"sym"'%mode)
             if pi!=False:
                 pi = self.get_pi(pi)
@@ -1219,7 +1898,7 @@ class EgocentricSBM(MutableSequence):
             if k is None:
                 from math import log2, ceil
                 k = ceil(log2(len(self)))
-            lap = self.get_laplacian(mode, pi, norm)
+            lap = self.get_laplacian(mode, pi, norm=norm)
             eigval, eigvec = np.linalg.eigh(lap)
             k = max(min(len(eigvec), k), 1)
             if plot:
@@ -1281,7 +1960,33 @@ class EgocentricSBM(MutableSequence):
                 for cluster in to_merge: out.merge(cluster)
                 return out
 
-        def project(self, directed=False, m=None, scale=False, plot=False):
+        def project(self, d=2, pi=None, block_only=False, ratio=True, mds=True):
+            a = self.get_psi(directed=False)
+            flag = False
+            if pi!=False:
+                pi = self.get_pi(pi)
+                deg = np.diag(np.sqrt(1/np.dot(a, pi)))
+                if ratio: a = np.matmul(np.matmul(deg, a), deg)
+                if not block_only:
+                    sim = np.diag(np.sqrt(pi))
+                    a = np.matmul(np.matmul(sim, a), sim)
+                    flag  = True
+            eigval, eigvec = np.linalg.eigh(a)
+            idx = np.argsort(np.abs(eigval), kind='mergesort')
+            eigval = eigval[idx]
+            eigval = eigval[::-1]
+            eigval = eigval[0:min(d, len(eigval))]
+            eigvec = eigvec[:, idx]
+            eigvec = eigvec[:, ::-1]
+            eigvec = eigvec[:, 0:min(d, eigvec.shape[1])]
+            if flag: eigvec = np.matmul(np.diag(np.sqrt(1/pi)), eigvec)
+            if mds: proj = np.multiply(eigvec, np.sqrt(eigval)[np.newaxis,:])
+            else:
+                proj = np.dot(a, eigvec)
+                proj /= np.linalg.norm(a, 2, 1)[:,np.newaxis]
+            return proj
+
+        def reduce(self, directed=False, m=None, scale=False, plot=False, return_dims=False):
             if m is None:
                 from math import log2, ceil
                 m = ceil(log2(len(self)))
@@ -1294,58 +1999,60 @@ class EgocentricSBM(MutableSequence):
             proj /= np.linalg.norm(a, 2, 1)[:,np.newaxis]
             com_pos = [[self.dims[j] for j in range(proj.shape[0]) if proj[j,i]>=0] for i in range(1, m+1)]
             com_neg = [[self.dims[j] for j in range(proj.shape[0]) if proj[j,i]<0] for i in range(1, m+1)]
-            psi = []
-            pi = []
-            om = []
-            for i in range(m):
-                tmp = self.copy()
-                tmp.merge(com_pos[i])
-                tmp.merge(com_neg[i])
-                psi.append(tmp.get_psi(directed=directed))
-                pi.append(tmp.get_pi())
-                om.append(tmp.get_omega())
-            omega_full = self.kron(om, self.meanomega)
-            pi_full = self.kron(pi)
-            psi_full = self.kron(psi, self.meanomega)
-            if scale:
-                factor = max(np.abs(eigval))/max(np.abs(np.linalg.eigvals(psi_full)))
-                omega_full *= factor
-                psi_full *= factor
-            if plot:
-                import matplotlib.pyplot as plt
-                eigval_full = np.linalg.eigvals(psi_full)
-                eigval_logabs = np.sort(np.log2(np.abs(eigval)), kind='mergesort')
-                eigval_full_logabs = np.sort(np.log2(np.abs(eigval_full)), kind='mergesort')
-                eigval_del = np.diff(eigval_logabs)
-                h1 = plt.scatter(eigval_logabs[1:], eigval_del, color='black', label='original')
-                for i in eigval_full_logabs[-(m+1):]: h2 = plt.gca().axvline(i, ls='--', color='red', label='inferred (top m+1)')
-                plt.xlabel('log(abs(eig))')
-                plt.ylabel('del log(abs(eig))')
-                plt.legend(handles=[h1, h2])
-                plt.title('inferring latent sbm with %d dims'%m)
-                plt.show()
-                try:                    
-                    import seaborn as sns
-                    omo = np.log2(self.get_omega())
-                    omo = omo[~np.isinf(omo)]
-                    omi = np.log2(omega_full)
-                    omi = omi[~np.isinf(omi)]
-                    sns.distplot(omo, label='original')
-                    sns.distplot(omi, label='inferred')
-                    plt.gca().axvline(np.log2(self.meanomega), ls='--', color='black', label='original mean omega')
-                    plt.title('distribution of log(omega)')
-                    plt.legend()
+            if not return_dims:
+                psi = []
+                pi = []
+                om = []
+                for i in range(m):
+                    tmp = self.copy()
+                    tmp.merge(com_pos[i])
+                    tmp.merge(com_neg[i])
+                    psi.append(tmp.get_psi(directed=directed))
+                    pi.append(tmp.get_pi())
+                    om.append(tmp.get_omega())
+                omega_full = self.kron(om, self.meanomega)
+                pi_full = self.kron(pi)
+                psi_full = self.kron(psi, self.meanomega)
+                if scale:
+                    factor = max(np.abs(eigval))/max(np.abs(np.linalg.eigvals(psi_full)))
+                    omega_full *= factor
+                    psi_full *= factor
+                if plot:
+                    import matplotlib.pyplot as plt
+                    eigval_full = np.linalg.eigvals(psi_full)
+                    eigval_logabs = np.sort(np.log2(np.abs(eigval)), kind='mergesort')
+                    eigval_full_logabs = np.sort(np.log2(np.abs(eigval_full)), kind='mergesort')
+                    eigval_del = np.diff(eigval_logabs)
+                    h1 = plt.scatter(eigval_logabs[1:], eigval_del, color='black', label='original')
+                    for i in eigval_full_logabs[-(m+1):]: h2 = plt.gca().axvline(i, ls='--', color='red', label='inferred (top m+1)')
+                    plt.xlabel('log(abs(eig))')
+                    plt.ylabel('del log(abs(eig))')
+                    plt.legend(handles=[h1, h2])
+                    plt.title('inferring latent sbm with %d dims'%m)
                     plt.show()
-                    sns.distplot(eigval_logabs, label='original')
-                    sns.distplot(eigval_full_logabs, label='inferred')
-                    plt.legend()
-                    plt.title('distribution of log(abs(eig))')
-                    plt.show()
-                except ImportError as err: pass
-                except Exception as err: raise err
-            return type(self)(psi_full, pi_full, name=self.name+'.proj')
+                    try:                    
+                        import seaborn as sns
+                        omo = np.log2(self.get_omega())
+                        omo = omo[~np.isinf(omo)]
+                        omi = np.log2(omega_full)
+                        omi = omi[~np.isinf(omi)]
+                        sns.distplot(omo, label='original')
+                        sns.distplot(omi, label='inferred')
+                        plt.gca().axvline(np.log2(self.meanomega), ls='--', color='black', label='original mean omega')
+                        plt.title('distribution of log(omega)')
+                        plt.legend()
+                        plt.show()
+                        sns.distplot(eigval_logabs, label='original')
+                        sns.distplot(eigval_full_logabs, label='inferred')
+                        plt.legend()
+                        plt.title('distribution of log(abs(eig))')
+                        plt.show()
+                    except ImportError as err: pass
+                    except Exception as err: raise err
+                return type(self)(psi_full, pi_full, name=self.name+'.proj')
+            else: return com_pos, com_neg
 
-        def eigproj(self, directed=False, m=None, plot=False):
+        def reduce_pp(self, directed=False, m=None, plot=False):
             if m is None:
                 from math import log2, ceil
                 m = ceil(log2(len(self)))
@@ -1443,7 +2150,7 @@ class EgocentricSBM(MutableSequence):
 
         def generate_people(self, n, pi=None): return np.random.multinomial(1, self.get_pi(pi), n)
         
-        def generate_network(self, people, directed=None):
+        def generate_network(self, people, psi=None, constant_degree=False, directed=None):
             n, d = people.shape
             people = np.array(np.array(people, dtype=bool), dtype=int)
             factor = 1/(n-1) #correction to keep graph simple
@@ -1451,7 +2158,7 @@ class EgocentricSBM(MutableSequence):
             if not (all([i==1 for i in people.sum(1)]) and all([1 in i for i in people])): raise ValueError('expected single-memberships only')
             keep = people.sum(axis=0)>0 #ignoring communities with 0 members
             people = people[:,keep]
-            psi = self.get_psi()[keep,:][:,keep]
+            psi = self.get_psi(psi, constant_degree=constant_degree)[keep,:][:,keep]
             p = np.matmul(np.matmul(people, factor*psi), people.transpose())
             p[p>1] = 1.
             np.fill_diagonal(p, 0)
@@ -1463,22 +2170,22 @@ class EgocentricSBM(MutableSequence):
                 a = a + a.transpose()
             return a, p, keep
         
-        def generate_networkdata(self, n, pi=None, directed=False, name=None):
+        def generate_networkdata(self, n, pi=None, psi=None, constant_degree=False, directed=False, name=None):
             z = self.generate_people(n, pi)
-            a, p, keep = self.generate_network(z, directed)
+            a, p, keep = self.generate_network(z, psi, constant_degree, directed)
             d = np.array(self.dims)
             d = tuple(d[keep])
             if name is None: name = self.name + '.net'
             return NetworkData(a, z[:,keep], d, p, name)
 
-        def generate_networkx(self, n, pi=None, directed=False, selfloops=False):
+        def generate_networkx(self, n, pi=None, psi=None, constant_degree=False, directed=False, selfloops=False):
             if not isinstance(n, int): raise TypeError('expected n to be int; got %s'%type(n))
             if selfloops: factor = 1/n
             else: factor = 1/(n-1)
             people = self.generate_people(n, pi).sum(axis=0)
             keep = people>0
             people = people[keep]
-            p = factor*(self.get_psi(directed)[keep,:][:,keep])
+            p = factor*(self.get_psi(psi, constant_degree=constant_degree, directed=directed)[keep,:][:,keep])
             p[p>1] = 1
             params = dict(sizes=people.tolist(), p=p.tolist(), directed=directed, selfloops=selfloops)
             try:
@@ -1488,10 +2195,38 @@ class EgocentricSBM(MutableSequence):
                 warn('unable to import stochastic_block_model from networkx; returning dict of stochastic_block_model params', ImportWarning)
                 return params
         
-        def eigvals_pipsi(self, pi=None, directed=None, real=False):
+        def entropy(self, pi=None, rho=None):
             pi = self.get_pi(pi)
-            if real: return sorted(np.real(np.linalg.eigvals(np.matmul(np.diag(pi), self.get_psi(directed)))), reverse=True)
-            else: return sorted(np.linalg.eigvals(np.matmul(np.diag(pi), self.get_psi(directed))), reverse=True)
+            if rho is not None:
+                rho = self.get_pi(rho)
+                if len(pi.shape)==2 and len(rho.shape)==1: return np.array([self.entropy(pi[:,i], rho) for i in range(pi.shape[1])])
+                elif len(pi.shape)==1 and len(rho.shape)==2: return np.array([self.entropy(pi, rho[:,i]) for i in range(rho.shape[1])])
+                elif len(pi.shape)==2 and len(rho.shape)==2: return np.stack([np.array([self.entropy(pi[:,j], rho[:,i]) for j in range(pi.shape[1])]) for i in range(rho.shape[1])])
+                if not np.logical_or(rho!=0, pi==0).all(): raise ValueError('relative entropy of pi w.r.t. rho is defined only if rho==0 --> pi==0')
+                idx = pi!=0
+                return (-pi[idx]*np.log2(rho[idx]/pi[idx])).sum()
+            else:
+                if len(pi.shape)==2: return np.array([self.entropy(pi[:,i]) for i in range(pi.shape[1])])
+                idx = pi!=0
+                return (-pi[idx]*np.log2(pi[idx])).sum()
+        
+        def eig_adj(self, pi=None, psi=None, constant_degree=False, mode='out', normalization=None, scale=0.9, sort=True):
+            pi = self.get_pi(pi)
+            pipsi = self.get_pipsi(pi, psi, constant_degree, mode, 'pre', normalization, scale)
+            eigval, eigvec = np.linalg.eig(pipsi)
+            pi[pi==0] = 1. #ignore non existent communities
+            eigvec /= pi[:,np.newaxis]
+            if sort:
+                idx = np.argsort(eigval, kind='mergesort')
+                eigval = eigval[idx][::-1]
+                eigvec = eigvec[:, idx][:, ::-1]
+            return eigval, eigvec
+
+        def eigvals_pipsi(self, pi=None, psi=None, constant_degree=False, directed=None, ratio=False):
+            pi = self.get_pi(pi)
+            psi = self.get_psi(psi, constant_degree=constant_degree, directed=directed)
+            if ratio: psi = np.matmul(np.diag(1/np.dot(psi, pi)), psi)
+            return sorted(np.linalg.eigvals(np.matmul(np.diag(pi), psi)), reverse=True)
         
         def eigvals_pipsi_theoretical(self):
             pi = 1/self.get_shape()
@@ -1500,31 +2235,31 @@ class EgocentricSBM(MutableSequence):
             elif self.mode=='ppcollapsed': eigs = sorted(tuple(pi*self.meanomega*self.kron([(h[0]+h[1]*(s-1),)+(h[0]-h[1],)*(s-1) for (h, s) in zip(self.params, self.shape)], self.meanomega)), reverse=True)
             return eigs
         
-        def homoffinity_out(self, pi=None, directed=None, log=False, ratio=False, approx=False): return np.diag(self.get_psi(directed, log, ratio, approx))*self.get_pi(pi, approx)
-        def homoffinity_in(self, pi=None, directed=None, log=False, ratio=False, approx=False): return self.homoffinity_out(pi, directed, log, ratio, approx)
-        def homoffinity(self, pi=None, directed=None, log=False, ratio=False, approx=False): return self.homoffinity_out(pi, directed, log, ratio, approx)
+        def homoffinity_out(self, pi=None, psi=None, constant_degree=False, directed=None, log=False, ratio=False, approx=False): return np.diag(self.get_psi(psi, constant_degree=constant_degree, directed=directed, log=log, ratio=ratio, approx=approx))*self.get_pi(pi, approx)
+        def homoffinity_in(self, pi=None, psi=None, constant_degree=False, directed=None, log=False, ratio=False, approx=False): return self.homoffinity_out(pi, psi, constant_degree, directed, log, ratio, approx)
+        def homoffinity(self, pi=None, psi=None, constant_degree=False, directed=None, log=False, ratio=False, approx=False): return self.homoffinity_out(pi, psi, constant_degree, directed, log, ratio, approx)
             
-        def heteroffinity_out(self, pi=None, directed=None, log=False, ratio=False, approx=False): return self.affinity_out(pi, directed, log, ratio, approx)-self.homoffinity_out(pi, directed, log, ratio, approx)
-        def heteroffinity_in(self, pi=None, directed=None, log=False, ratio=False, approx=False): return self.affinity_in(pi, directed, log, ratio, approx)-self.homoffinity_in(pi, directed, log, ratio, approx)
-        def heteroffinity(self, pi=None, directed=None, log=False, ratio=False, approx=False): return self.affinity(pi, directed, log, ratio, approx)-self.homoffinity(pi, directed, log, ratio, approx)
+        def heteroffinity_out(self, pi=None, psi=None, constant_degree=False, directed=None, log=False, ratio=False, approx=False): return self.affinity_out(pi, psi, constant_degree, directed, log, ratio, approx)-self.homoffinity_out(pi, psi, constant_degree, directed, log, ratio, approx)
+        def heteroffinity_in(self, pi=None, psi=None, constant_degree=False, directed=None, log=False, ratio=False, approx=False): return self.affinity_in(pi, psi, constant_degree, directed, log, ratio, approx)-self.homoffinity_in(pi, psi, constant_degree, directed, log, ratio, approx)
+        def heteroffinity(self, pi=None, psi=None, constant_degree=False, directed=None, log=False, ratio=False, approx=False): return self.affinity(pi, psi, constant_degree, directed, log, ratio, approx)-self.homoffinity(pi, psi, constant_degree, directed, log, ratio, approx)
         
-        def affinity_out(self, pi=None, directed=None, log=False, ratio=False, approx=False): return self.find_mean(self.get_psi(directed, log, ratio, approx), pi, approx)
-        def affinity_in(self, pi=None, directed=None, log=False, ratio=False, approx=False): return self.find_mean(self.get_psi(directed, log, ratio, approx).transpose(), pi, approx)
-        def affinity(self, pi=None, directed=None, log=False, ratio=False, approx=False):
+        def affinity_out(self, pi=None, psi=None, constant_degree=False, directed=None, log=False, ratio=False, approx=False): return self.find_mean(self.get_psi(psi, constant_degree=constant_degree, directed=directed, log=log, ratio=ratio, approx=approx), pi, approx)
+        def affinity_in(self, pi=None, psi=None, constant_degree=False, directed=None, log=False, ratio=False, approx=False): return self.find_mean(self.get_psi(psi, constant_degree=constant_degree, directed=directed, log=log, ratio=ratio, approx=approx).transpose(), pi, approx)
+        def affinity(self, pi=None, psi=None, constant_degree=False, directed=None, log=False, ratio=False, approx=False):
             if self.directed and (directed or directed is None): raise RuntimeError('affinity is ambiguous for directed SBMs; use affinity_in() or affinity_out()')
-            else: return self.affinity_out(pi, directed, log, ratio, approx)
+            else: return self.affinity_out(pi, psi, constant_degree, directed, log, ratio, approx)
         
-        def mean_homoffinity_out(self, pi=None, directed=None, log=False, ratio=False, approx=False): return self.find_mean(self.homoffinity_out(pi, directed, log, ratio, approx), pi, approx)
-        def mean_homoffinity_in(self, pi=None, directed=None, log=False, ratio=False, approx=False): return self.find_mean(self.homoffinity_in(pi, directed, log, ratio, approx), pi, approx)
-        def mean_homoffinity(self, pi=None, directed=None, log=False, ratio=False, approx=False): return self.find_mean(self.homoffinity(pi, directed, log, ratio, approx), pi, approx)
+        def mean_homoffinity_out(self, pi=None, psi=None, constant_degree=False, directed=None, log=False, ratio=False, approx=False): return self.find_mean(self.homoffinity_out(pi, psi, constant_degree, directed, log, ratio, approx), pi, approx)
+        def mean_homoffinity_in(self, pi=None, psi=None, constant_degree=False, directed=None, log=False, ratio=False, approx=False): return self.find_mean(self.homoffinity_in(pi, psi, constant_degree, directed, log, ratio, approx), pi, approx)
+        def mean_homoffinity(self, pi=None, psi=None, constant_degree=False, directed=None, log=False, ratio=False, approx=False): return self.find_mean(self.homoffinity(pi, psi, constant_degree, directed, log, ratio, approx), pi, approx)
         
-        def mean_heteroffinity_out(self, pi=None, directed=None, log=False, ratio=False, approx=False): return self.find_mean(self.heteroffinity_out(pi, directed, log, ratio, approx), pi, approx)
-        def mean_heteroffinity_in(self, pi=None, directed=None, log=False, ratio=False, approx=False): return self.find_mean(self.heteroffinity_in(pi, directed, log, ratio, approx), pi, approx)
-        def mean_heteroffinity(self, pi=None, directed=None, log=False, ratio=False, approx=False): return self.find_mean(self.heteroffinity_out(pi, directed, log, ratio, approx), pi, approx)
+        def mean_heteroffinity_out(self, pi=None, psi=None, constant_degree=False, directed=None, log=False, ratio=False, approx=False): return self.find_mean(self.heteroffinity_out(pi, psi, constant_degree, directed, log, ratio, approx), pi, approx)
+        def mean_heteroffinity_in(self, pi=None, psi=None, constant_degree=False, directed=None, log=False, ratio=False, approx=False): return self.find_mean(self.heteroffinity_in(pi, psi, constant_degree, directed, log, ratio, approx), pi, approx)
+        def mean_heteroffinity(self, pi=None, psi=None, constant_degree=False, directed=None, log=False, ratio=False, approx=False): return self.find_mean(self.heteroffinity_out(pi, psi, constant_degree, directed, log, ratio, approx), pi, approx)
         
-        def mean_affinity_out(self, pi=None, directed=None, log=False, ratio=False, approx=False): return self.find_mean(self.affinity_out(pi, directed, log, ratio, approx), pi, approx)
-        def mean_affinity_in(self, pi=None, directed=None, log=False, ratio=False, approx=False): return self.find_mean(self.affinity_in(pi, directed, log, ratio, approx), pi, approx)
-        def mean_affinity(self, pi=None, directed=None, log=False, ratio=False, approx=False): return self.find_mean(self.affinity_out(pi, directed, log, ratio, approx), pi, approx)
+        def mean_affinity_out(self, pi=None, psi=None, constant_degree=False, directed=None, log=False, ratio=False, approx=False): return self.find_mean(self.affinity_out(pi, psi, constant_degree, directed, log, ratio, approx), pi, approx)
+        def mean_affinity_in(self, pi=None, psi=None, constant_degree=False, directed=None, log=False, ratio=False, approx=False): return self.find_mean(self.affinity_in(pi, psi, constant_degree, directed, log, ratio, approx), pi, approx)
+        def mean_affinity(self, pi=None, psi=None, constant_degree=False, directed=None, log=False, ratio=False, approx=False): return self.find_mean(self.affinity_out(pi, psi, constant_degree, directed, log, ratio, approx), pi, approx)
         
         def floyd_warshall(self, pw_dist_matrix, paths=True):
             if (pw_dist_matrix<0).any(): warn('negative pairwise distances can lead to negative path lengths')
@@ -1582,15 +2317,15 @@ class EgocentricSBM(MutableSequence):
             if not positivity: metric = metric + np.array([[temp*(len(paths[i][j])-1) for j in range(len(paths[i]))] for i in range(len(paths))])
             return metric
         
-        def sas_individual_pw(self, log=True, ratio=True, metric_type=None, approx=False): return self.dis2met(-self.get_psi(log=log, ratio=ratio, approx=approx), metric_type)
-        def sas_individual_out(self, log=True, ratio=True, metric_type=None, pi=None, approx=False): return self.find_mean(self.sas_individual_pw(log, ratio, metric_type, approx), pi, approx)
-        def sas_individual_in(self, log=True, ratio=True, metric_type=None, pi=None, approx=False): return self.find_mean(self.sas_individual_pw(log, ratio, metric_type, approx).transpose(), pi, approx)
-        def sas_individual(self, log=True, ratio=True, metric_type=None, pi=None, approx=False):
+        def sas_individual_pw(self, log=True, ratio=True, metric_type=None, psi=None, constant_degree=False, approx=False): return self.dis2met(-self.get_psi(psi, constant_degree=constant_degree, log=log, ratio=ratio, approx=approx), metric_type)
+        def sas_individual_out(self, log=True, ratio=True, metric_type=None, pi=None, psi=None, constant_degree=False, approx=False): return self.find_mean(self.sas_individual_pw(log, ratio, metric_type, psi, constant_degree, approx), pi, approx)
+        def sas_individual_in(self, log=True, ratio=True, metric_type=None, pi=None, psi=None, constant_degree=False, approx=False): return self.find_mean(self.sas_individual_pw(log, ratio, metric_type, psi, constant_degree, approx).transpose(), pi, approx)
+        def sas_individual(self, log=True, ratio=True, metric_type=None, pi=None, psi=None, constant_degree=False, approx=False):
             if self.directed: raise RuntimeError('individual SAS is ambiguous for directed SBMs; use sas_individual_out() or sas_individual_in()')
-            else: return self.sas_individual_out(log, ratio, metric_type, pi, approx)
-        def sas_global(self, log=True, ratio=True, metric_type=None, pi=None, static=False, approx=False):
-            if static: sas = self.sas_individual_out(log, ratio, metric_type, None, approx)
-            else: sas = self.sas_individual_out(log, ratio, metric_type, pi, approx)
+            else: return self.sas_individual_out(log, ratio, metric_type, pi, psi, constant_degree, approx)
+        def sas_global(self, log=True, ratio=True, metric_type=None, pi=None, psi=None, constant_degree=False, static=False, approx=False):
+            if static: sas = self.sas_individual_out(log, ratio, metric_type, None, psi, constant_degree, approx)
+            else: sas = self.sas_individual_out(log, ratio, metric_type, pi, psi, constant_degree, approx)
             #if (not log) and ratio: sas = -np.log2(-sas)
             sas_mean = self.find_mean(sas.transpose(), pi, approx)
             try:
@@ -1599,11 +2334,182 @@ class EgocentricSBM(MutableSequence):
             sas_var = self.find_var(sas.transpose(), pi, sas_mean, approx)
             return sas_mean, sas_var
 
+        def distance_totalvariation(self, pi=None, psi=None, constant_degree=False, directed=None, subgraph=False):
+            pi = self.get_pi(pi)
+            psi = self.get_psi(psi, constant_degree=constant_degree, directed=directed)
+            psi *= pi[np.newaxis,:]
+            psi /= psi.sum(1)[:,np.newaxis]
+            #if subgraph: out = 0.5*np.abs(np.diag(psi) - pi)
+            #out = 0.5*np.abs(np.matmul(psi - pi[np.newaxis,:], np.diag(pi))).sum(1) #total variation distance
+            out = (0.5*np.abs(np.diag(psi) - pi),  0.5*np.abs(np.matmul(psi - pi[np.newaxis,:], np.diag(pi))).sum(1))
+            return out
+
+        def centrality_controllability(self, pi=None, psi=None, constant_degree=False, directed=None, mode='modal'):
+            eigval, eigvec = self.eig_adj(pi, psi, constant_degree, normalization='schur_stable')
+            return np.dot(eigvec**2, 1-eigval**2)
+
+        def centrality_betweenness(self, pi=None, psi=None, constant_degree=False, directed=None, scale=0.9, decay=1., boundary_init=1., boundary_final=1., ratio=False, ignore_self=False):
+            n = len(self)
+            if isinstance(decay, np.ndarray):
+                decay = decay.flatten()
+                if len(decay)!=n: raise ValueError('expected decay to be a scalar or vector of length %i'%n)
+            else: decay = decay*np.ones(n)
+            if any(decay<0) or any(decay>1): warn('having a decay outside [0,1] can lead to unexpected results')
+            if isinstance(boundary_init, np.ndarray):
+                boundary_init = boundary_init.flatten()
+                if len(boundary_init)!=n: raise ValueError('expected boundary_init to be a scalar or vector of length %i'%n)
+            else: boundary_init = boundary_init*np.ones(n)
+            if isinstance(boundary_final, np.ndarray):
+                boundary_final = boundary_final.flatten()
+                if len(boundary_final)!=n: raise ValueError('expected boundary_final to be a scalar or vector of length %i'%n)
+            else: boundary_final = boundary_final*np.ones(n)
+            pi = self.get_pi(pi)
+            psi = self.get_psi(psi, constant_degree=constant_degree, directed=directed)
+            if ratio: psi = np.matmul(np.diag(1/np.dot(psi, pi)), psi)
+            if ignore_self: np.fill_diagonal(psi, 0)
+            psi = np.matmul(np.diag(decay), psi)
+            matrix_in = np.matmul(psi, np.diag(pi))
+            matrix_out = np.matmul(psi.transpose(), np.diag(pi))
+            if scale is not None:
+                if scale<0: raise ValueError('scale value must be non-negative')
+                elif scale<0.5: warn('scale much smaller than 1 may lead to small dynamic range of output values')
+                elif scale>0.99: warn('scale close to or greater than 1 may lead to unstable or unexpected results such as negative values')
+                scale *= min(1, 1/max(abs(np.linalg.eigvals(matrix_in))))
+                warn('scale factor %f'%scale)
+                matrix_in *= scale
+                matrix_out *= scale
+            else: warn('not scaling may lead to unexpected results such as negative values')
+            betweenness = np.multiply(np.dot((np.linalg.inv(np.eye(n) - matrix_in) - np.eye(n)), boundary_init), np.dot((np.linalg.inv(np.eye(n) - matrix_out) - np.eye(n)), boundary_final))
+            return betweenness
+
+        def centrality_closeness(self, pi=None, psi=None, constant_degree=False, mode='in', scale=0.9, decay=1., boundary=1., ratio=False, ignore_self=False):
+            from scipy.linalg import logm
+            n = len(self)
+            if isinstance(decay, np.ndarray):
+                decay = decay.flatten()
+                if len(decay)!=n: raise ValueError('expected decay to be a scalar or vector of length %i'%n)
+            else: decay = decay*np.ones(n)
+            if any(decay<0) or any(decay>1): warn('having a decay outside [0,1] can lead to unexpected results')
+            if isinstance(boundary, np.ndarray):
+                boundary = boundary.flatten()
+                if len(boundary)!=n: raise ValueError('expected boundary to be a scalar or vector of length %i'%n)
+            else: boundary = boundary*np.ones(n)
+            pi = self.get_pi(pi)
+            psi = self.get_psi(psi, constant_degree=constant_degree)
+            if ratio: psi = np.matmul(np.diag(1/np.dot(psi, pi)), psi)
+            if ignore_self: np.fill_diagonal(psi, 0)
+            if mode=='in': psi = psi.transpose()
+            elif mode!='out': raise ValueError('mode "%s" not recognized; use "out"/"in"'%mode)
+            psi = np.matmul(np.diag(decay), psi)
+            matrix = np.matmul(psi, np.diag(pi))
+            if scale is not None:
+                if scale<0: raise ValueError('scale value must be non-negative')
+                elif scale<0.5: warn('scale much smaller than 1 may lead to small dynamic range of output values')
+                elif scale>0.99: warn('scale close to or greater than 1 may lead to unstable or unexpected results such as negative values')
+                scale = min(1, scale/max(abs(np.linalg.eigvals(matrix))))
+                if scale!=1: warn('scaling matrix by %f'%scale)
+                matrix *= scale
+            else: warn('not scaling may lead to unexpected results such as negative values')
+            closeness = -np.dot(logm(np.eye(n) - matrix),  boundary)
+            return closeness
+
+        def centrality_communicability(self, pi=None, psi=None, constant_degree=False, mode='in', decay=1., boundary=1., ratio=False, ignore_self=False):
+            from scipy.linalg import expm
+            n = len(self)
+            if isinstance(decay, np.ndarray):
+                decay = decay.flatten()
+                if len(decay)!=n: raise ValueError('expected decay to be a scalar or vector of length %i'%n)
+            else: decay = decay*np.ones(n)
+            if any(decay<0) or any(decay>1): warn('having a decay outside [0,1] can lead to unexpected results')
+            if isinstance(boundary, np.ndarray):
+                boundary = boundary.flatten()
+                if len(boundary)!=n: raise ValueError('expected boundary to be a scalar or vector of length %i'%n)
+            else: boundary = boundary*np.ones(n)
+            pi = self.get_pi(pi)
+            psi = self.get_psi(psi, constant_degree=constant_degree)
+            if ratio: psi = np.matmul(np.diag(1/np.dot(psi, pi)), psi)
+            if ignore_self: np.fill_diagonal(psi, 0)
+            if mode=='in': psi = psi.transpose()
+            elif mode!='out': raise ValueError('mode "%s" not recognized; use "out"/"in"'%mode)
+            psi = np.matmul(np.diag(decay), psi)
+            matrix = np.matmul(psi, np.diag(pi))
+            communicability = np.dot(expm(matrix),  boundary)
+            return communicability
+
+        def centrality_katz(self, pi=None, psi=None, constant_degree=False, mode='in', scale=0.9, decay=1., boundary=1., ratio=False, ignore_self=False):
+            n = len(self)
+            if isinstance(decay, np.ndarray):
+                decay = decay.flatten()
+                if len(decay)!=n: raise ValueError('expected decay to be a scalar or vector of length %i'%n)
+            else: decay = decay*np.ones(n)
+            if any(decay<0) or any(decay>1): warn('having a decay outside [0,1] can lead to unexpected results')
+            if isinstance(boundary, np.ndarray):
+                boundary = boundary.flatten()
+                if len(boundary)!=n: raise ValueError('expected boundary to be a scalar or vector of length %i'%n)
+            else: boundary = boundary*np.ones(n)
+            pi = self.get_pi(pi)
+            psi = self.get_psi(psi, constant_degree=constant_degree)
+            if ratio: psi = np.matmul(np.diag(1/np.dot(psi, pi)), psi)
+            if ignore_self: np.fill_diagonal(psi, 0)
+            if mode=='in': psi = psi.transpose()
+            elif mode!='out': raise ValueError('mode "%s" not recognized; use "out"/"in"'%mode)
+            psi = np.matmul(np.diag(decay), psi)
+            matrix = np.matmul(psi, np.diag(pi))
+            if scale is not None:
+                if scale<0: raise ValueError('scale value must be non-negative')
+                elif scale<0.5: warn('scale much smaller than 1 may lead to small dynamic range of output values')
+                elif scale>0.99: warn('scale close to or greater than 1 may lead to unstable or unexpected results such as negative values')
+                scale = min(1, scale/max(abs(np.linalg.eigvals(matrix))))
+                if scale!=1: warn('scaling matrix by %f'%scale)
+                matrix *= scale
+            else: warn('not scaling may lead to unexpected results such as negative values')
+            katz = np.dot((np.linalg.inv(np.eye(n) - matrix) - np.eye(n)), boundary)
+            return katz
+
+        def centrality_eigenvector(self, pi=None, psi=None, constant_degree=False, mode='in', ratio=False, ignore_self=False):
+            n = len(self)
+            pi = self.get_pi(pi)
+            psi = self.get_psi(psi, constant_degree=constant_degree)
+            if ratio: psi = np.matmul(np.diag(1/np.dot(psi, pi)), psi)
+            if ignore_self: np.fill_diagonal(psi, 0)
+            if mode=='in': psi = psi.transpose()
+            elif mode!='out': raise ValueError('mode "%s" not recognized; use "out"/"in"'%mode)
+            matrix = np.matmul(psi, np.diag(pi))
+            eigval, eigvec = np.linalg.eig(matrix)
+            idx = np.argsort(abs(eigval))[-1]
+            eigvec = eigvec[:,idx]
+            if ratio: eigvec = np.abs(eigvec/eigvec.sum())
+            return eigvec
+
+        def centrality_returntime(self, pi=None, psi=None, constant_degree=False, mode='in', scale=0.9, boundary=1., ratio=False, ignore_self=False):
+            n = len(self)
+            if isinstance(boundary, np.ndarray):
+                boundary = boundary.flatten()
+                if len(boundary)!=n: raise ValueError('expected boundary to be a scalar or vector of length %i'%n)
+            else: boundary = boundary*np.ones(n)
+            pi = self.get_pi(pi)
+            psi = self.get_psi(psi, constant_degree=constant_degree)
+            if ratio: psi = np.matmul(np.diag(1/np.dot(psi, pi)), psi)
+            if ignore_self: np.fill_diagonal(psi, 0)
+            if mode=='in': psi = psi.transpose()
+            elif mode!='out': raise ValueError('mode "%s" not recognized; use "out"/"in"'%mode)
+            matrix = np.matmul(psi, np.diag(pi))
+            if scale is not None:
+                if scale<0: raise ValueError('scale value must be non-negative')
+                elif scale<0.5: warn('scale much smaller than 1 may lead to small dynamic range of output values')
+                elif scale>0.99: warn('scale close to or greater than 1 may lead to unstable or unexpected results such as negative values')
+                scale = min(1, scale/max(abs(np.linalg.eigvals(matrix))))
+                if scale!=1: warn('scaling matrix by %f'%scale)
+                matrix *= scale
+            else: warn('not scaling may lead to unexpected results such as negative values')
+            returntime = np.dot(np.matmul(np.linalg.matrix_power(np.linalg.inv(np.eye(n) - matrix), 2) - np.eye(n), psi), boundary)
+            return returntime
+
         def generate_barcode(self, pi=None, n=float('inf'), name=None): return self.Barcode(self, pi, n, name)
 
         class Barcode():
 
-            def __init__(self, sbm=None, pi=None, n=float('inf'), name=None, filepath=None):
+            def __init__(self, sbm=None, pi=None, psi=None, constant_degree=False, n=float('inf'), name=None, filepath=None):
                 if isinstance(sbm, str): sbm = EgocentricSBM.StochasticBlockModel(filepath=sbm)
                 elif sbm is None:
                     if filepath is None: raise ValueError('either provide "sbm" as a valid StochasticBlockModel, or as the path to an .npz file containing a valid StochasticBlockModel, or provide "filepath" to an .npz file containing a valid Barcode')
@@ -1612,7 +2518,7 @@ class EgocentricSBM(MutableSequence):
                     return
                 k = len(sbm)
                 idx = np.triu_indices(k)
-                psi = -sbm.get_psi(directed=False, approx=True) #distances for Veitoris-Rips complex
+                psi = -sbm.get_psi(psi, constant_degree=constant_degree, directed=False, approx=True) #distances for Veitoris-Rips complex
                 psi = psi[idx]
                 num = len(psi)
                 idx_sort = np.argsort(psi, kind='mergesort')
@@ -1621,13 +2527,13 @@ class EgocentricSBM(MutableSequence):
                 idx_col = idx[1][idx_sort]
                 path_matrix = np.zeros((k, k), dtype=bool)
                 edge_list = list()
+                #edge_list = [((a,b),) for a, b in zip(idx[0][idx_sort], idx[1][idx_sort])]
                 conn_list = list()
                 for i in range(num):
-                    p = idx_row[i]
-                    q = idx_col[i]
+                    p, q = idx_row[i], idx_col[i]
                     edge_list.append(((p, q),))
                     if p==q: conn_list.append((path_matrix[p,:].any(),))
-                    else: conn_list.append(((path_matrix[p,:].any(), path_matrix[q,:].any(), path_matrix[p,q]), ))
+                    else: conn_list.append(((path_matrix[p,:].any(), path_matrix[q,:].any(), path_matrix[p,q]),))
                     path_matrix[p,q] = True #p can reach q
                     path_matrix[q,p] = True #q can reach p
                     path_matrix[p] |= path_matrix[q] #everything that can be reached by q can be reached by p
@@ -1668,28 +2574,62 @@ class EgocentricSBM(MutableSequence):
                 else: num_pi = 1
                 if pi.shape[0]!=self.k: raise ValueError('expected pi to have %d entries, but it contains %d entries'%(self.k, pi.shape[0]))
                 num = len(self)
+                #idx2com = list(range(self.k))
+                #com2idx = [[]]*self.k
                 if num_pi==1:
                     complex_1 = 0 #number of 1-complexes (edges)
                     betti_0 = 1 #Betti number 0 (number of connected components)
                     betti_0_curve = np.zeros(num, dtype=np.float32)
                     betti_1_curve = np.zeros(num, dtype=np.float32)
+                    #combet0 = [0]*self.k
+                    #combet1 = [0]*self.k
+                    #betti_0_indiv = [[(0, 0)]]*self.k
+                    #betti_1_indiv = [[(0, 0)]]*self.k
                 else:
                     complex_1 = np.zeros(num_pi, dtype=np.float32)
                     betti_0 = np.ones(num_pi, dtype=np.float32)
                     betti_0_curve = np.zeros((num, num_pi), dtype=np.float32)
                     betti_1_curve = np.zeros((num, num_pi), dtype=np.float32)
+                    #combet0 = [np.zeros(num_pi, dtype=np.float32)]*self.k
+                    #combet1 = [np.zeros(num_pi, dtype=np.float32)]*self.k
+                    #betti_0_indiv = [[(0, np.zeros(num_pi, dtype=np.float32))]]*self.k
+                    #betti_1_indiv = [[(0, np.zeros(num_pi, dtype=np.float32))]]*self.k
                 if n==float('inf'):
                     for i in range(num):
+                        #print(i, num)
                         for j in range(len(self.event[i])):
                             p, q = self.event[i][j]
+                            #com_p = idx2com[p]
+                            #com_q = idx2com[q]
                             if p==q: #intra-community closure
                                 complex_1 += pi[p]**2/2 #increment number of edges
-                                if not self.state[i][j]: betti_0 -= pi[p] #decrease number of connected components
+                                #combet1[com_p] += pi[p]**2/2
+                                if not self.state[i][j]: #not com2idx[com_p]:
+                                    #com2idx[com_p].append(p)
+                                    betti_0 -= pi[p] #decrease number of connected components
+                                    #combet0[com_p] += pi[p]
                                 else: pass #p was already in a larger component
                             else:  #inter-community closure
+                                #if com_p!=com_q: #not self.state[i][j][2]:
+                                #    combet0[com_p] += combet0[com_q]
+                                #    combet1[com_p] += combet1[com_q]
                                 complex_1 += pi[p]*pi[q] #increment number of edges
-                                if not self.state[i][j][0]: betti_0 -= pi[p]
-                                if not self.state[i][j][1]: betti_0 -= pi[q]
+                                #combet1[com_p] += pi[p]*pi[q]
+                                if not self.state[i][j][0]: #not com2idx[com_p]:
+                                    #com2idx[com_p].append(p)
+                                    betti_0 -= pi[p]
+                                    #combet0[com_p] += pi[p]
+                                if not self.state[i][j][1]: #not com2idx[com_q]:
+                                    #com2idx[com_q].append(q)
+                                    betti_0 -= pi[q]
+                                    #combet0[com_p] += pi[q]
+                            #if com_p!=com_q:
+                            #    com2idx[com_p] += com2idx[com_q]
+                            #    com2idx[com_q] = []
+                            #for e in com2idx[com_p]:
+                            #    idx2com[e] = com_p
+                            #    betti_0_indiv[e].append((i, combet0[com_p]))
+                            #    betti_1_indiv[e].append((i, combet1[com_p]))
                         betti_0_curve[i] = betti_0
                         betti_1_curve[i] = complex_1
                 else:
@@ -1701,27 +2641,53 @@ class EgocentricSBM(MutableSequence):
                     for i in range(num):
                         for j in range(len(self.event[i])):
                             p, q = self.event[i][j]
+                            com_p = idx2com[p]
+                            com_q = idx2com[q]
                             if p==q: #intra-community closure
                                 complex_1 += n*pi[p]*(n*pi[p]-1)/2 #increment number of edges
-                                if not self.state[i][j]: betti_0 -= n*pi[p]-1 #decrease number of connected components
+                                combet1[com_p] += n*pi[p]*(n*pi[p]-1)/2
+                                if not com2idx[com_p]: #not self.state[i][j]:
+                                    com2idx[com_p].append(p)
+                                    betti_0 -= n*pi[p]-1 #decrease number of connected components
+                                    combet0[com_p] += n*pi[p]
                                 else: pass #p was already in a larger component
                             else:  #inter-community closure
+                                if com_p!=com_q: #not self.state[i][j][2]:
+                                    combet0[com_p] += combet0[com_q]
+                                    combet1[com_p] += combet1[com_q]
                                 complex_1 += n**2*pi[p]*pi[q] #increment number of edges
-                                if self.state[i][j][0] and self.state[i][j][1]:
-                                    if not self.state[i][j][2]: betti_0 -= 1 #decrease number of connected components only if p-q were previously in different connected components
-                                elif (not self.state[i][j][0]) and self.state[i][j][1]: betti_0 -= n*pi[p] #p gets absorbed in component of q
-                                elif self.state[i][j][0] and (not self.state[i][j][1]): betti_0 -= n*pi[q] #q gets absorbed in component of p
-                                else: betti_0 -= n*(pi[p]+pi[q])-1 #p and q form their own connected component
+                                combet1[com_p] += n**2*pi[p]*pi[q]
+                                if com2idx[com_p] and com2idx[com_q]: #self.state[i][j][0] and self.state[i][j][1]:
+                                    if com_p!=com_q: #not self.state[i][j][2]: #decrease number of connected components only if p-q were previously in different connected components
+                                        betti_0 -= 1
+                                elif (not com2idx[com_p]) and com2idx[com_q]: #(not self.state[i][j][0]) and self.state[i][j][1]: #p gets absorbed in component of q
+                                    betti_0 -= n*pi[p]
+                                    com2idx[com_p] += n*pi[p]
+                                elif com2idx[com_p] and (not com2idx[com_q]): #self.state[i][j][0] and (not self.state[i][j][1]): #q gets absorbed in component of p
+                                    betti_0 -= n*pi[q]
+                                    com2idx[com_p] += n*pi[q]
+                                else: #p and q form their own connected component
+                                    betti_0 -= n*(pi[p]+pi[q])-1
+                                    com2idx[com_p] += n*(pi[p]+pi[q])
+                            if com_p!=com_q:
+                                com2idx[com_p] += com2idx[com_q]
+                                com2idx[com_q] = []
+                            for e in com2idx[com_p]:
+                                idx2com[e] = com_p
+                                betti_0_indiv[e].append((i, combet0[com_p]))
+                                betti_1_indiv[e].append((i, combet1[com_p]))
                         betti_0_curve[i] = betti_0
                         betti_1_curve[i] = betti_0 - complex_0 + complex_1 #from Euler's characteristic: k-n+m
                 self.n = n
                 self.pi = pi
                 self.betti0 = betti_0_curve
                 self.betti1 = betti_1_curve
+                #self.betti0c = betti_0_indiv
+                #self.betti1c = betti_1_indiv
 
             def reset(self): self.set(self._pi, self._n)
 
-            def get_params(self): return {'name':self.name, 'k':self.k, 'dims':self.dims, 'epsilon':self.epsilon, 'event':self.event, 'state':self.state, '_n':self._n, '_pi':self._pi, 'n':self.n, 'pi':self.pi, 'betti0':self.betti0, 'betti1':self.betti1}
+            def get_params(self): return {'name':self.name, 'k':self.k, 'dims':self.dims, 'epsilon':self.epsilon, 'event':self.event, 'state':self.state, '_n':self._n, '_pi':self._pi, 'n':self.n, 'pi':self.pi, 'betti0':self.betti0, 'betti1':self.betti1}#, 'betti0c':self.betti0c, 'betti1':self.betti1c}
 
             def save(self, filepath=None):
                 if filepath is None: filepath = self.name
@@ -1741,6 +2707,8 @@ class EgocentricSBM(MutableSequence):
                 self.pi = file['pi']
                 self.betti0 = file['betti0']
                 self.betti1 = file['betti1']
+                #self.betti0c = list(file['betti0c'])
+                #self.betti1c = list(file['betti1c'])
 
             def delta(self, x): return np.diff(x, axis=0)
 
@@ -1753,7 +2721,7 @@ class EgocentricSBM(MutableSequence):
 
             def integrate(self, y, x): return np.trapz(y, x, axis=0)
 
-            def factorize(self, delimiter_dim=',', delimiter_val=':'):
+            def get_dims(self, delimiter_dim=',', delimiter_val=':'):
                 try: dims = [dict([tuple(d.split(delimiter_val)) for d in dim.split(delimiter_dim)]) for dim in self.dims]
                 except ValueError as err: raise ValueError('unable to factorize dimension names; ensure apt delimiter_dim and delimiter_val')
                 dims_dict = {k:list() for k in dims[0].keys()}
