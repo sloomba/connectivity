@@ -1,5 +1,5 @@
-from utils import *
-from gkde import GaussianKernelDistribution
+from .utils import *
+from .probs import GaussianKernelDistribution
 
 class CategoricalBlauDimension():
 
@@ -212,8 +212,8 @@ class OrdinalBlauDimension():
 
     def __init__(self, partition=None, pi=None, theta=None, omega=None, inverse=True, name=None):
         self.name = str(name)
-        self.set_partition(partition, inverse=inverse)
         self.set_pi(pi)
+        self.set_partition(partition, inverse=inverse, theta=theta, omega=omega)
 
     def __len__(self): return len(self.partition)-1
 
@@ -222,7 +222,8 @@ class OrdinalBlauDimension():
         if size<=0: raise ValueError('expected number of categories to be a positive integer')
 
     def check_partition(self, partition):
-        if (not isiterable_till(partition)) or len(partition)<2 or partition[0]!=0 or partition[-1]!=1 or (np.diff(partition)<=0).any(): raise ValueError('expected partition to indicate disjoint interval boundaries over the complete continuous domain [0,1]')
+        import numpy as np
+        if (not isiterable_till(partition)) or len(partition)<2 or not np.allclose(partition[0], 0) or not np.allclose(partition[-1], 1) or (np.diff(partition)<=0).any(): raise ValueError('expected partition to indicate disjoint interval boundaries over the complete continuous domain [0,1]')
 
     def check_pi(self, pi):
         rv_atts = ['pdf', 'cdf']
@@ -357,13 +358,13 @@ class OrdinalBlauDimension():
         if plot: self.plot_mat(rho, title='$\\rho$', annot=annot)
         return rho
 
-    def set_partition(self, partition=None, k=1, inverse=False):
+    def set_partition(self, partition=None, k=1, inverse=False, theta=None, omega=None):
         if partition is None: partition = self.get_partition((0., 1.), k=k)
         elif inverse: partition = self.old2new(partition)
         self.check_partition(partition)
         self.partition = tuple(partition)
-        self.set_theta()
-        self.set_omega()
+        self.set_theta(theta)
+        self.set_omega(omega)
 
     def set_pi(self, pi=None):
         if pi is None:
@@ -2170,13 +2171,23 @@ class EgocentricSBM(MutableSequence):
                 a = a + a.transpose()
             return a, p, keep
         
-        def generate_networkdata(self, n, pi=None, psi=None, constant_degree=False, directed=False, name=None):
+        def generate_networkdata(self, n, pi=None, psi=None, constant_degree=False, directed=False, networkx_label='', name=None):
             z = self.generate_people(n, pi)
             a, p, keep = self.generate_network(z, psi, constant_degree, directed)
-            d = np.array(self.dims)
-            d = tuple(d[keep])
-            if name is None: name = self.name + '.net'
-            return NetworkData(a, z[:,keep], d, p, name)
+            if networkx_label:
+                import networkx as nx
+                if directed: G = nx.DiGraph()
+                else: G = nx.Graph()
+                for i in range(len(z)):
+                    G.add_node(i)
+                    G.nodes[i][networkx_label] = z[i].argmax()
+                    G.add_edges_from([(i, j) for j in range(len(z)) if a[i, j]])
+                return G
+            else:
+                d = np.array(self.dims)
+                d = tuple(d[keep])
+                if name is None: name = self.name + '.net'
+                return NetworkData(a, z[:,keep], d, p, name)
 
         def generate_networkx(self, n, pi=None, psi=None, constant_degree=False, directed=False, selfloops=False):
             if not isinstance(n, int): raise TypeError('expected n to be int; got %s'%type(n))
@@ -2192,6 +2203,7 @@ class EgocentricSBM(MutableSequence):
                 from networkx import stochastic_block_model 
                 return stochastic_block_model(**params)
             except Exception as err:
+                raise err
                 warn('unable to import stochastic_block_model from networkx; returning dict of stochastic_block_model params', ImportWarning)
                 return params
         
